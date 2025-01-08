@@ -1,21 +1,40 @@
-// This command is a Git hook for executing tests. It is intended to be used as the pre-commit hook.
+// This command is a Git hook. It is intended to be used as the pre-commit hook.
 package main
+
+// Copyright (c) 2025, João Breno. See the license.
 
 import (
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/types"
 	"io"
 	"os"
 	"os/exec"
+	"slices"
+	"strings"
+	"time"
+
+	"golang.org/x/tools/go/packages"
 )
 
 // stdout contains the standard output. We use it for allow tests to change the destination of the output.
 var stdout io.Writer = os.Stdout
 
-// stdout contains the os.Exit function. We use it for allow tests to change the what the exit do.
+// exit contains the os.Exit function. We use it for allow tests to change what the exit do.
 var exit = os.Exit
+
+// runTestsPackagesPath contains the path to be used for running the tests. We use it for allow tests to change that path.
+var runTestsPackagesPath = "." + string(os.PathSeparator) + "..."
+
+// checkHasTestsPackagesPath contains the path to be used for verifiyng if the packages have tests. We use it for allow tests
+// to change that path.
+var checkHasTestsPackagesPath = "." + string(os.PathSeparator) + "..."
+
+// packageTestTimeout is the timeout of the tests of each package. We use it for allow tests to change that duration.
+var packageTestTimeout time.Duration = 30 * time.Second
 
 func main() {
 	stderr := new(bytes.Buffer)
@@ -30,7 +49,20 @@ func main() {
 		if stderr.Len() > 0 {
 			fmt.Fprintln(stdout, stderr.String())
 		}
+
 		exit(1)
+		return // maybe the exit function was changed in tests
+	}
+
+	results = new(bytes.Buffer)
+	if ok, err = verifyIfHasTests(results); err != nil {
+		panic(err)
+	}
+
+	if !ok {
+		fmt.Fprintln(stdout, results.String())
+		exit(1)
+		return
 	}
 }
 
@@ -39,7 +71,7 @@ func main() {
 func runTests(stderr, results *bytes.Buffer) (ok bool, err error) {
 	ok = true
 
-	cmd := exec.Command("go", "test", "-json", "-timeout=10s", "-vet=off", "."+string(os.PathSeparator)+"...")
+	cmd := exec.Command("go", "test", "-json", "-timeout="+packageTestTimeout.String(), "-vet=off", runTestsPackagesPath)
 
 	stdout := new(bytes.Buffer)
 
@@ -63,17 +95,18 @@ func runTests(stderr, results *bytes.Buffer) (ok bool, err error) {
 			return ok, err
 		}
 
-		if te.Action != "fail" {
-			continue
+		if te.Action == "fail" {
+			if te.Test == "" {
+				continue
+			}
+
+			fmt.Fprintf(results, "%s: %s failed\n", te.Package, te.Test)
+			ok = false
+		} else if te.Action == "output" && strings.HasPrefix(te.Output, "panic: test timed out after") {
+			fmt.Fprintf(results, "%s: %s\n", te.Package, te.Output)
+			ok = false
 		}
 
-		if te.Test == "" {
-			continue
-		}
-
-		fmt.Fprintf(results, "%s: %s failed\n", te.Package, te.Test)
-
-		ok = false
 	}
 
 	return
@@ -84,4 +117,118 @@ type testEvent struct {
 	Action  string
 	Package string
 	Test    string
+	Output  string
+}
+
+// verifyIfHasTests verify for each package if it need and has tests.
+func verifyIfHasTests(results *bytes.Buffer) (ok bool, err error) {
+	cfg := &packages.Config{
+		Mode:  packages.NeedName | packages.NeedSyntax | packages.NeedTypesInfo,
+		Tests: true,
+	}
+	pkgs, err := packages.Load(cfg, checkHasTestsPackagesPath)
+	if err != nil {
+		return ok, err
+	}
+
+	var needTest []string
+	var withTests []string
+
+	for _, pkg := range pkgs {
+		if strings.HasSuffix(pkg.PkgPath, ".test") {
+			continue
+		}
+		if !needTests(pkg) {
+			continue
+		}
+		needTest = append(needTest, pkg.PkgPath)
+		if hasTests(pkg) {
+			withTests = append(withTests, pkg.PkgPath)
+		}
+	}
+
+	ok = true
+	for _, pkg := range pkgs {
+		if strings.HasSuffix(pkg.PkgPath, ".test") {
+			continue
+		}
+		if slices.Contains(needTest, pkg.PkgPath) && !slices.Contains(withTests, pkg.PkgPath) {
+			fmt.Fprintf(results, "%s has no tests\n", pkg.PkgPath)
+			ok = false
+		}
+	}
+
+	return
+}
+
+// needTests reports wheter pkg need tests.
+func needTests(pkg *packages.Package) bool {
+	for _, s := range pkg.Syntax {
+		f := pkg.Fset.File(s.FileStart)
+		if strings.HasSuffix(f.Name(), "_test.go") {
+			continue
+		}
+
+		for _, d := range s.Decls {
+			if _, ok := d.(*ast.FuncDecl); ok {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// hasTests reports wheter pkg has tests.
+func hasTests(pkg *packages.Package) bool {
+	for _, s := range pkg.Syntax {
+		f := pkg.Fset.File(s.FileStart)
+		if !strings.HasSuffix(f.Name(), "_test.go") {
+			continue
+		}
+
+		for _, d := range s.Decls {
+			f, ok := d.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			if isTestFunction(pkg.TypesInfo, f) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// isTestFunction reports wheter f has the signature of a test function.
+func isTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
+	if !strings.HasPrefix(f.Name.Name, "Test") {
+		return false
+	}
+
+	sig := ti.Defs[f.Name].Type().(*types.Signature)
+	if sig.Params().Len() != 1 {
+		return false
+	}
+
+	paramPointer, ok := sig.Params().At(0).Type().(*types.Pointer)
+	if !ok {
+		return false
+	}
+
+	paramNamed, ok := paramPointer.Elem().(*types.Named)
+	if !ok {
+		return false
+	}
+
+	if pkg := paramNamed.Obj().Pkg(); pkg == nil || pkg.Path() != "testing" {
+		return false
+	}
+
+	if paramNamed.Obj().Name() != "T" {
+		return false
+	}
+
+	return true
 }
