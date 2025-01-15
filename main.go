@@ -16,6 +16,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/tools/go/packages"
 )
@@ -37,19 +39,14 @@ var checkHasTestsPackagesPath = "." + string(os.PathSeparator) + "..."
 var packageTestTimeout time.Duration = 30 * time.Second
 
 func main() {
-	stderr := new(bytes.Buffer)
 	results := new(bytes.Buffer)
-	ok, err := runTests(stderr, results)
+	ok, err := runTests(results)
 	if err != nil {
 		panic(err)
 	}
 
 	if !ok {
 		fmt.Fprintln(stdout, results.String())
-		if stderr.Len() > 0 {
-			fmt.Fprintln(stdout, stderr.String())
-		}
-
 		exit(1)
 		return // maybe the exit function was changed in tests
 	}
@@ -66,9 +63,9 @@ func main() {
 	}
 }
 
-// runTests calls go test on the packages. The standard error of the command is written to stderr. Test fails are written to results.
+// runTests calls go test on the packages. Test fails are written to results.
 // If the go test command runs successfully and all tests pass then ok will be true.
-func runTests(stderr, results *bytes.Buffer) (ok bool, err error) {
+func runTests(results *bytes.Buffer) (ok bool, err error) {
 	ok = true
 
 	cmd := exec.Command("go", "test", "-json", "-timeout="+packageTestTimeout.String(), "-vet=off", runTestsPackagesPath)
@@ -76,7 +73,6 @@ func runTests(stderr, results *bytes.Buffer) (ok bool, err error) {
 	stdout := new(bytes.Buffer)
 
 	cmd.Stdout = stdout
-	cmd.Stderr = stderr
 
 	err = cmd.Run()
 	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
@@ -203,6 +199,10 @@ func hasTests(pkg *packages.Package) bool {
 
 // isTestFunction reports wheter f has the signature of a test function.
 func isTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
+	if isFuzzTestFunction(ti, f) {
+		return true
+	}
+
 	if !strings.HasPrefix(f.Name.Name, "Test") {
 		return false
 	}
@@ -231,4 +231,45 @@ func isTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
 	}
 
 	return true
+}
+
+// isFuzzTestFunction reports wheter f has the signature of a fuzz test function.
+func isFuzzTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
+	if !strings.HasPrefix(f.Name.Name, "Fuzz") {
+		return false
+	}
+	if startWithLowerCaseLetter(strings.TrimPrefix(f.Name.Name, "Fuzz")) {
+		return false
+	}
+
+	sig := ti.Defs[f.Name].Type().(*types.Signature)
+	if sig.Params().Len() != 1 {
+		return false
+	}
+
+	paramPointer, ok := sig.Params().At(0).Type().(*types.Pointer)
+	if !ok {
+		return false
+	}
+
+	paramNamed, ok := paramPointer.Elem().(*types.Named)
+	if !ok {
+		return false
+	}
+
+	if pkg := paramNamed.Obj().Pkg(); pkg == nil || pkg.Path() != "testing" {
+		return false
+	}
+
+	if paramNamed.Obj().Name() != "F" {
+		return false
+	}
+
+	return true
+}
+
+// startWithLowerCaseLetter reports if s start with a lower case letter.
+func startWithLowerCaseLetter(s string) bool {
+	r, _ := utf8.DecodeRuneInString(s)
+	return unicode.IsLower(r)
 }

@@ -160,10 +160,9 @@ func TestRunTestsFail(t *testing.T) {
 	wd := chdir(path.Join("testdata", "testfail"), t)
 	defer chdir(wd, t)
 
-	stderr := new(bytes.Buffer)
 	results := new(bytes.Buffer)
 
-	ok, err := runTests(stderr, results)
+	ok, err := runTests(results)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,10 +180,9 @@ func TestRunTestsOk(t *testing.T) {
 	wd := chdir(path.Join("testdata", "testok"), t)
 	defer chdir(wd, t)
 
-	stderr := new(bytes.Buffer)
 	results := new(bytes.Buffer)
 
-	ok, err := runTests(stderr, results)
+	ok, err := runTests(results)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,10 +204,9 @@ func TestRunTestsCmdRunFail(t *testing.T) {
 	p := setpath(wd, t)
 	defer setpath(p, t)
 
-	stderr := new(bytes.Buffer)
 	results := new(bytes.Buffer)
 
-	if _, err = runTests(stderr, results); err == nil {
+	if _, err = runTests(results); err == nil {
 		t.Errorf("not returned a error")
 	}
 }
@@ -235,10 +232,9 @@ func TestRunTestsCmdNoJson(t *testing.T) {
 	p := setpath(wd, t)
 	defer setpath(p, t)
 
-	stderr := new(bytes.Buffer)
 	results := new(bytes.Buffer)
 
-	if _, err = runTests(stderr, results); err == nil {
+	if _, err = runTests(results); err == nil {
 		t.Errorf("not returned a error")
 	}
 }
@@ -247,12 +243,11 @@ func TestRunTestsTimeout(t *testing.T) {
 	wd := chdir(path.Join("testdata", "timeout"), t)
 	defer chdir(wd, t)
 
-	stderr := new(bytes.Buffer)
 	results := new(bytes.Buffer)
 
 	packageTestTimeout = 1 * time.Millisecond
 
-	ok, err := runTests(stderr, results)
+	ok, err := runTests(results)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,6 +259,23 @@ func TestRunTestsTimeout(t *testing.T) {
 
 func TestCheckHasTests(t *testing.T) {
 	wd := chdir(path.Join("testdata", "testok"), t)
+	defer chdir(wd, t)
+
+	results := new(bytes.Buffer)
+
+	ok, err := verifyIfHasTests(results)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !ok {
+		t.Errorf("ok = false, want true")
+		t.Error(results.String())
+	}
+}
+
+func TestCheckHasFuzzTests(t *testing.T) {
+	wd := chdir(path.Join("testdata", "testfuzz"), t)
 	defer chdir(wd, t)
 
 	results := new(bytes.Buffer)
@@ -356,11 +368,18 @@ func TestIsTestFunction(t *testing.T) {
 		import "testing"
 		type A int
 		func sum(a, b int) int {return a + b}
+		func Testsum() {}
 		func TestSum(a, b int) {}
 		func TestSum2(a int) {}
 		func TestSum3(a *int) {}
 		func TestSum4(a *A) {}
 		func TestSum5(a *testing.B) {}
+		func FuzzSum(a, b int) {}
+		func FuzzSum2(a int) {}
+		func FuzzSum3(a *int) {}
+		func FuzzSum4(a *A) {}
+		func FuzzSum5(a *testing.B) {}
+		func Fuzzsum() {}
 	`
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "code.go", code, 0)
@@ -404,6 +423,13 @@ func TestNoNeedTests(t *testing.T) {
 
 	if needTests(pkgs[0]) {
 		t.Errorf("package noneedtests no need tests, but needTests() returned true")
+	}
+}
+
+func BenchmarkHasNoTests(b *testing.B) {
+	b.Chdir(path.Join("testdata", "notests"))
+	for b.Loop() {
+		main()
 	}
 }
 

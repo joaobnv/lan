@@ -1,0 +1,16 @@
+goos: windows
+goarch: amd64
+pkg: github.com/joaobnv/lan
+cpu: 11th Gen Intel(R) Core(TM) i7-11390H @ 3.40GHz
+BenchmarkHasNoTests-8   	       4	 324037000 ns/op
+BenchmarkHasNoTests-8   	       4	 312519075 ns/op
+BenchmarkHasNoTests-8   	       3	 377188933 ns/op
+BenchmarkHasNoTests-8   	       3	 437833500 ns/op
+BenchmarkHasNoTests-8   	       3	 352868033 ns/op
+BenchmarkHasNoTests-8   	       4	 324199425 ns/op
+BenchmarkHasNoTests-8   	       4	 326394675 ns/op
+BenchmarkHasNoTests-8   	       4	 320761525 ns/op
+BenchmarkHasNoTests-8   	       3	 335211067 ns/op
+BenchmarkHasNoTests-8   	       4	 332263950 ns/op
+PASS
+ok  	github.com/joaobnv/lan	181.741s
