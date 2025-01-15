@@ -1,8 +1,11 @@
 # lan
-Git hook for executing tests on Git commit of go packages.
+Git hook for executing tests on commit of go packages.
 
 This hook executes the tests of the packages in the folder and subfolders of the git repository.
 If any test fails then the commit is denied. The timeout for the tests is 30s for each package.
+
+This hook executes ```go vet``` in each package. If it exits with a non-zero value then the commit
+is denied.
 
 This hook checks if the package needs tests but doesn't have them. If this occurs then the commit is denied.
 

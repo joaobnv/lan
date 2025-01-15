@@ -28,8 +28,8 @@ var stdout io.Writer = os.Stdout
 // exit contains the os.Exit function. We use it for allow tests to change what the exit do.
 var exit = os.Exit
 
-// runTestsPackagesPath contains the path to be used for running the tests. We use it for allow tests to change that path.
-var runTestsPackagesPath = "." + string(os.PathSeparator) + "..."
+// packagesPath contains the path to be used for running the tests and vet. We use it for allow tests to change that path.
+var packagesPath = "." + string(os.PathSeparator) + "..."
 
 // checkHasTestsPackagesPath contains the path to be used for verifiyng if the packages have tests. We use it for allow tests
 // to change that path.
@@ -38,8 +38,24 @@ var checkHasTestsPackagesPath = "." + string(os.PathSeparator) + "..."
 // packageTestTimeout is the timeout of the tests of each package. We use it for allow tests to change that duration.
 var packageTestTimeout time.Duration = 30 * time.Second
 
+// executeVet is wheter is to run vet or not. We use it for allow tests to change the execution or not of vet.
+var executeVet = true
+
 func main() {
 	results := new(bytes.Buffer)
+	if executeVet {
+		ok, err := runVet(results)
+		if err != nil {
+			panic(err)
+		}
+		if !ok {
+			fmt.Fprintln(stdout, results.String())
+			exit(1)
+			return // maybe the exit function was changed in tests
+		}
+	}
+
+	results.Reset()
 	ok, err := runTests(results)
 	if err != nil {
 		panic(err)
@@ -48,7 +64,7 @@ func main() {
 	if !ok {
 		fmt.Fprintln(stdout, results.String())
 		exit(1)
-		return // maybe the exit function was changed in tests
+		return
 	}
 
 	results = new(bytes.Buffer)
@@ -63,12 +79,28 @@ func main() {
 	}
 }
 
+// runVet calls go vet on the packages. Vet fails are written to results.
+// If the go vet command runs successfully and pass then ok will be true.
+func runVet(results *bytes.Buffer) (ok bool, err error) {
+	cmd := exec.Command("go", "vet", packagesPath)
+	cmd.Stderr = results
+
+	err = cmd.Run()
+	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
+		return false, nil
+	} else if err != nil {
+		return ok, err
+	}
+
+	return true, nil
+}
+
 // runTests calls go test on the packages. Test fails are written to results.
 // If the go test command runs successfully and all tests pass then ok will be true.
 func runTests(results *bytes.Buffer) (ok bool, err error) {
 	ok = true
 
-	cmd := exec.Command("go", "test", "-json", "-timeout="+packageTestTimeout.String(), "-vet=off", runTestsPackagesPath)
+	cmd := exec.Command("go", "test", "-json", "-timeout="+packageTestTimeout.String(), "-vet=off", packagesPath)
 
 	stdout := new(bytes.Buffer)
 

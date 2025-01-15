@@ -57,7 +57,36 @@ func TestMainTestsStderr(t *testing.T) {
 	}
 }
 
-func TestMainCmdRunFail(t *testing.T) {
+func TestMainCmdRunTestsFail(t *testing.T) {
+	executeVet = false
+	defer func() {
+		executeVet = true
+	}()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Errorf("panic expected")
+		}
+
+		_, ok := r.(error)
+		if !ok {
+			t.Errorf("error expected, got %T", r)
+		}
+	}()
+
+	t.Chdir(path.Join("testdata", "testfail"))
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", wd)
+
+	main()
+}
+
+func TestMainCmdRunVetFail(t *testing.T) {
 	defer func() {
 		r := recover()
 		if r == nil {
@@ -145,6 +174,25 @@ func TestMainHasTestsWithoutTests(t *testing.T) {
 
 	if exitCode != 1 {
 		t.Errorf("exit code = %d, want 1", exitCode)
+	}
+}
+
+func TestRunVetFail(t *testing.T) {
+	t.Chdir(path.Join("testdata", "printfvet"))
+
+	results := new(bytes.Buffer)
+
+	ok, err := runVet(results)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if ok {
+		t.Errorf("ok = true, want false")
+	}
+
+	if results.Len() == 0 {
+		t.Errorf("vet without output")
 	}
 }
 
