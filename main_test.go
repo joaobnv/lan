@@ -17,9 +17,7 @@ import (
 )
 
 func TestMainTestsFail(t *testing.T) {
-	wd := chdir(path.Join("testdata", "testfail"), t)
-	defer chdir(wd, t)
-
+	t.Chdir(path.Join("testdata", "testfail"))
 	var exitCode int
 
 	stdout = new(bytes.Buffer)
@@ -39,8 +37,7 @@ func TestMainTestsFail(t *testing.T) {
 }
 
 func TestMainTestsStderr(t *testing.T) {
-	wd := chdir(path.Join("testdata", "stderr"), t)
-	defer chdir(wd, t)
+	t.Chdir(path.Join("testdata", "stderr"))
 
 	var exitCode int
 
@@ -73,23 +70,20 @@ func TestMainCmdRunFail(t *testing.T) {
 		}
 	}()
 
-	wd := chdir(path.Join("testdata", "testfail"), t)
-	defer chdir(wd, t)
+	t.Chdir(path.Join("testdata", "testfail"))
 
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	p := setpath(wd, t)
-	defer setpath(p, t)
+	t.Setenv("PATH", wd)
 
 	main()
 }
 
 func TestMainTimeout(t *testing.T) {
-	wd := chdir(path.Join("testdata", "timeout"), t)
-	defer chdir(wd, t)
+	t.Chdir(path.Join("testdata", "timeout"))
 
 	packageTestTimeout = 1 * time.Millisecond
 
@@ -124,8 +118,7 @@ func TestMainHasTestsPackageLoadError(t *testing.T) {
 		}
 	}()
 
-	wd := chdir(path.Join("testdata", "testok"), t)
-	defer chdir(wd, t)
+	t.Chdir(path.Join("testdata", "testok"))
 
 	pp := checkHasTestsPackagesPath
 	checkHasTestsPackagesPath = "\x00<\\/>" // I think \x00 is not allowed in Linux and Windows.
@@ -135,8 +128,7 @@ func TestMainHasTestsPackageLoadError(t *testing.T) {
 }
 
 func TestMainHasTestsWithoutTests(t *testing.T) {
-	wd := chdir(path.Join("testdata", "withouttests"), t)
-	defer chdir(wd, t)
+	t.Chdir(path.Join("testdata", "withouttests"))
 
 	stdout = new(bytes.Buffer)
 
@@ -157,8 +149,7 @@ func TestMainHasTestsWithoutTests(t *testing.T) {
 }
 
 func TestRunTestsFail(t *testing.T) {
-	wd := chdir(path.Join("testdata", "testfail"), t)
-	defer chdir(wd, t)
+	t.Chdir(path.Join("testdata", "testfail"))
 
 	results := new(bytes.Buffer)
 
@@ -177,8 +168,7 @@ func TestRunTestsFail(t *testing.T) {
 }
 
 func TestRunTestsOk(t *testing.T) {
-	wd := chdir(path.Join("testdata", "testok"), t)
-	defer chdir(wd, t)
+	t.Chdir(path.Join("testdata", "testok"))
 
 	results := new(bytes.Buffer)
 
@@ -193,16 +183,14 @@ func TestRunTestsOk(t *testing.T) {
 }
 
 func TestRunTestsCmdRunFail(t *testing.T) {
-	wd := chdir(path.Join("testdata", "testfail"), t)
-	defer chdir(wd, t)
+	t.Chdir(path.Join("testdata", "testfail"))
 
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	p := setpath(wd, t)
-	defer setpath(p, t)
+	t.Setenv("PATH", wd)
 
 	results := new(bytes.Buffer)
 
@@ -217,20 +205,19 @@ func TestRunTestsCmdNoJson(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	wd := chdir(path.Join("testdata", "nojson"), t)
-	defer chdir(wd, t)
+	t.Chdir(path.Join("testdata", "nojson"))
 
 	cmd := exec.Command(pgo, "build", "go.go")
 	if err := cmd.Run(); err != nil {
 		t.Fatal(err)
 	}
 
-	if wd, err = os.Getwd(); err != nil {
+	wd, err := os.Getwd()
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	p := setpath(wd, t)
-	defer setpath(p, t)
+	t.Setenv("PATH", wd)
 
 	results := new(bytes.Buffer)
 
@@ -240,8 +227,7 @@ func TestRunTestsCmdNoJson(t *testing.T) {
 }
 
 func TestRunTestsTimeout(t *testing.T) {
-	wd := chdir(path.Join("testdata", "timeout"), t)
-	defer chdir(wd, t)
+	t.Chdir(path.Join("testdata", "timeout"))
 
 	results := new(bytes.Buffer)
 
@@ -258,8 +244,7 @@ func TestRunTestsTimeout(t *testing.T) {
 }
 
 func TestCheckHasTests(t *testing.T) {
-	wd := chdir(path.Join("testdata", "testok"), t)
-	defer chdir(wd, t)
+	t.Chdir(path.Join("testdata", "testok"))
 
 	results := new(bytes.Buffer)
 
@@ -275,8 +260,7 @@ func TestCheckHasTests(t *testing.T) {
 }
 
 func TestCheckHasFuzzTests(t *testing.T) {
-	wd := chdir(path.Join("testdata", "testfuzz"), t)
-	defer chdir(wd, t)
+	t.Chdir(path.Join("testdata", "testfuzz"))
 
 	results := new(bytes.Buffer)
 
@@ -292,8 +276,7 @@ func TestCheckHasFuzzTests(t *testing.T) {
 }
 
 func TestHasNoTests(t *testing.T) {
-	wd := chdir(path.Join("testdata", "notests"), t)
-	defer chdir(wd, t)
+	t.Chdir(path.Join("testdata", "notests"))
 
 	results := new(bytes.Buffer)
 
@@ -315,8 +298,7 @@ func TestHasNoTests(t *testing.T) {
 }
 
 func TestCheckHasTestsPackageLoadError(t *testing.T) {
-	wd := chdir(path.Join("testdata", "testok"), t)
-	defer chdir(wd, t)
+	t.Chdir(path.Join("testdata", "testok"))
 	pp := checkHasTestsPackagesPath
 	checkHasTestsPackagesPath = "\x00<\\/>" // I think \x00 is not allowed in Linux and Windows.
 	defer func() { checkHasTestsPackagesPath = pp }()
@@ -330,8 +312,7 @@ func TestCheckHasTestsPackageLoadError(t *testing.T) {
 }
 
 func TestCheckHasTestsWithoutTests(t *testing.T) {
-	wd := chdir(path.Join("testdata", "withouttests"), t)
-	defer chdir(wd, t)
+	t.Chdir(path.Join("testdata", "withouttests"))
 
 	results := new(bytes.Buffer)
 
@@ -346,8 +327,7 @@ func TestCheckHasTestsWithoutTests(t *testing.T) {
 }
 
 func TestCheckHasTestsNeedNotTests(t *testing.T) {
-	wd := chdir(path.Join("testdata", "noneedtests"), t)
-	defer chdir(wd, t)
+	t.Chdir(path.Join("testdata", "noneedtests"))
 
 	results := new(bytes.Buffer)
 
@@ -410,8 +390,7 @@ func TestIsTestFunction(t *testing.T) {
 }
 
 func TestNoNeedTests(t *testing.T) {
-	wd := chdir(path.Join("testdata", "noneedtests"), t)
-	defer chdir(wd, t)
+	t.Chdir(path.Join("testdata", "noneedtests"))
 
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedSyntax | packages.NeedTypesInfo,
@@ -431,31 +410,4 @@ func BenchmarkHasNoTests(b *testing.B) {
 	for b.Loop() {
 		main()
 	}
-}
-
-// chdir changes the current working directory, it calls os.Chdir with new. It returns the working directory
-// that was in effect before the change.
-func chdir(new string, t *testing.T) (old string) {
-	old, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err = os.Chdir(new); err != nil {
-		t.Fatal(err)
-	}
-
-	return
-}
-
-// setpath changes the PATH, it calls os.Setenv with new. It returns the PATH
-// that was in effect before the change.
-func setpath(new string, t *testing.T) (old string) {
-	old = os.Getenv("PATH")
-
-	if err := os.Setenv("PATH", new); err != nil {
-		t.Fatal(err)
-	}
-
-	return
 }
