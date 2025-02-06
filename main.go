@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -67,7 +68,7 @@ func main() {
 		return
 	}
 
-	results = new(bytes.Buffer)
+	results.Reset()
 	if ok, err = verifyIfHasTests(results); err != nil {
 		panic(err)
 	}
@@ -95,12 +96,15 @@ func runVet(results *bytes.Buffer) (ok bool, err error) {
 	return true, nil
 }
 
+var coverageRe = regexp.MustCompile(`^coverage: (\d{1,3}(?:\.\d)?)% of statements\n$`)
+
 // runTests calls go test on the packages. Test fails are written to results.
-// If the go test command runs successfully and all tests pass then ok will be true.
+// If the go test command runs successfully and all tests pass and the coverage
+// is 100% then ok will be true.
 func runTests(results *bytes.Buffer) (ok bool, err error) {
 	ok = true
 
-	cmd := exec.Command("go", "test", "-json", "-timeout="+packageTestTimeout.String(), "-vet=off", packagesPath)
+	cmd := exec.Command("go", "test", "-json", "-timeout="+packageTestTimeout.String(), "-vet=off", "-cover", packagesPath)
 
 	stdout := new(bytes.Buffer)
 
@@ -133,6 +137,12 @@ func runTests(results *bytes.Buffer) (ok bool, err error) {
 		} else if te.Action == "output" && strings.HasPrefix(te.Output, "panic: test timed out after") {
 			fmt.Fprintf(results, "%s: %s\n", te.Package, te.Output)
 			ok = false
+		} else if te.Action == "output" && coverageRe.MatchString(te.Output) {
+			submatches := coverageRe.FindAllStringSubmatch(te.Output, -1)
+			if submatches[0][1] != "100.0" {
+				fmt.Fprintf(results, "%s: test coverage is not 100.0%%\n", te.Package)
+				ok = false
+			}
 		}
 
 	}
@@ -236,6 +246,10 @@ func isTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
 	}
 
 	if !strings.HasPrefix(f.Name.Name, "Test") {
+		return false
+	}
+
+	if startWithLowerCaseLetter(strings.TrimPrefix(f.Name.Name, "Test")) {
 		return false
 	}
 

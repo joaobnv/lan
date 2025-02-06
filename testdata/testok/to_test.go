@@ -1,5 +1,7 @@
 package testok
 
+// Copyright (c) 2025, João Breno. See the license.
+
 import "testing"
 
 func TestSum(t *testing.T) {

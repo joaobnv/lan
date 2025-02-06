@@ -1,5 +1,7 @@
 package main
 
+// Copyright (c) 2025, João Breno. See the license.
+
 import (
 	"bytes"
 	"go/ast"
@@ -255,10 +257,16 @@ func TestRunTestsCmdNoJson(t *testing.T) {
 
 	t.Chdir(path.Join("testdata", "nojson"))
 
+	// create a fake go command that generates incorrect json.
 	cmd := exec.Command(pgo, "build", "go.go")
 	if err := cmd.Run(); err != nil {
 		t.Fatal(err)
 	}
+	defer func() {
+		if err := os.Remove(path.Join(".", "go.exe")); err != nil {
+			t.Fatal(err)
+		}
+	}()
 
 	wd, err := os.Getwd()
 	if err != nil {
@@ -288,6 +296,21 @@ func TestRunTestsTimeout(t *testing.T) {
 
 	if ok {
 		t.Errorf("timeout exceeded but runtests returned ok = true")
+	}
+}
+
+func TestRunTestsCoverageLessThan100(t *testing.T) {
+	t.Chdir(path.Join("testdata", "nocoverage"))
+
+	results := new(bytes.Buffer)
+
+	ok, err := runTests(results)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if ok {
+		t.Errorf("coverage is ot 100%% but runtests returned ok = true")
 	}
 }
 
@@ -396,7 +419,7 @@ func TestIsTestFunction(t *testing.T) {
 		import "testing"
 		type A int
 		func sum(a, b int) int {return a + b}
-		func Testsum() {}
+		func Testsum(t *testing.T) {}
 		func TestSum(a, b int) {}
 		func TestSum2(a int) {}
 		func TestSum3(a *int) {}

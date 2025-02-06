@@ -1,4 +1,5 @@
-package testfuzz
+// This package contains tests with coverage less than 100%.
+package main
 
 // Copyright (c) 2025, João Breno. See the license.
 

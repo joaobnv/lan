@@ -1,6 +1,8 @@
 // This command is a "go test -json" that generates incorrect json.
 package main
 
+// Copyright (c) 2025, João Breno. See the license.
+
 import (
 	"fmt"
 	"os"
