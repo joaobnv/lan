@@ -1,0 +1,2 @@
+// we dont need to follow the syntax of a coverprofile. We follow only the syntax required by the lan.
+0

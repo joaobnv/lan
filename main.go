@@ -4,7 +4,9 @@ package main
 // Copyright (c) 2025, João Breno. See the license.
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -29,122 +32,96 @@ var stdout io.Writer = os.Stdout
 // exit contains the os.Exit function. We use it for allow tests to change what the exit do.
 var exit = os.Exit
 
-// packagesPath contains the path to be used for running the tests and vet. We use it for allow tests to change that path.
-var packagesPath = "." + string(os.PathSeparator) + "..."
-
-// checkHasTestsPackagesPath contains the path to be used for verifiyng if the packages have tests. We use it for allow tests
-// to change that path.
-var checkHasTestsPackagesPath = "." + string(os.PathSeparator) + "..."
-
-// packageTestTimeout is the timeout of the tests of each package. We use it for allow tests to change that duration.
-var packageTestTimeout time.Duration = 30 * time.Second
-
-// executeVet is wheter is to run vet or not. We use it for allow tests to change the execution or not of vet.
-var executeVet = true
-
 func main() {
-	results := new(bytes.Buffer)
-	if executeVet {
-		ok, err := runVet(results)
-		if err != nil {
-			panic(err)
-		}
-		if !ok {
-			fmt.Fprintln(stdout, results.String())
-			exit(1)
-			return // maybe the exit function was changed in tests
-		}
-	}
-
-	results.Reset()
-	ok, err := runTests(results)
-	if err != nil {
-		panic(err)
-	}
-
-	if !ok {
-		fmt.Fprintln(stdout, results.String())
+	denyGit, message := run(
+		newVet(),
+		newTests(30*time.Second),
+		newThereAreTests(),
+	)
+	if denyGit {
+		fmt.Fprintln(stdout, message)
 		exit(1)
-		return
-	}
-
-	results.Reset()
-	if ok, err = verifyIfHasTests(results); err != nil {
-		panic(err)
-	}
-
-	if !ok {
-		fmt.Fprintln(stdout, results.String())
-		exit(1)
-		return
 	}
 }
 
-// runVet calls go vet on the packages. Vet fails are written to results.
-// If the go vet command runs successfully and pass then ok will be true.
-func runVet(results *bytes.Buffer) (ok bool, err error) {
-	cmd := exec.Command("go", "vet", packagesPath)
-	cmd.Stderr = results
+// run executes the operations.
+func run(ops ...operation) (denyGit bool, message string) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	err = cmd.Run()
-	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
-		return false, nil
-	} else if err != nil {
-		return ok, err
+	// operationResult is the result of the method run of a operation.
+	type operationResult struct {
+		message string
+		err     error
 	}
 
-	return true, nil
-}
-
-var coverageRe = regexp.MustCompile(`^coverage: (\d{1,3}(?:\.\d)?)% of statements\n$`)
-
-// runTests calls go test on the packages. Test fails are written to results.
-// If the go test command runs successfully and all tests pass and the coverage
-// is 100% then ok will be true.
-func runTests(results *bytes.Buffer) (ok bool, err error) {
-	ok = true
-
-	cmd := exec.Command("go", "test", "-json", "-timeout="+packageTestTimeout.String(), "-vet=off", "-cover", packagesPath)
-
-	stdout := new(bytes.Buffer)
-
-	cmd.Stdout = stdout
-
-	err = cmd.Run()
-	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
-		ok = false
-	} else if err != nil {
-		return ok, err
+	chOperationResult := make(chan operationResult, len(ops))
+	var wg sync.WaitGroup
+	for _, op := range ops {
+		op := op
+		wg.Go(func() {
+			message, err := op.run(ctx)
+			chOperationResult <- operationResult{message: message, err: err}
+		})
 	}
-	err = nil
 
-	dec := json.NewDecoder(stdout)
-	for {
-		var te testEvent
-		if err := dec.Decode(&te); err == io.EOF {
+	go func() {
+		wg.Wait()
+		close(chOperationResult)
+	}()
+
+	var errs []error
+	for or := range chOperationResult {
+		if or.err != nil {
+			errs = append(errs, or.err)
+		} else if or.message != "" {
+			message = or.message
+			denyGit = true
+			cancel()
 			break
-		} else if err != nil {
-			return ok, err
 		}
+	}
 
-		if te.Action == "fail" {
-			if te.Test == "" {
-				continue
-			}
+	if !denyGit && len(errs) > 0 {
+		denyGit = true
+		message = errors.Join(errs...).Error()
+	}
 
-			fmt.Fprintf(results, "%s: %s failed\n", te.Package, te.Test)
-			ok = false
-		} else if te.Action == "output" && strings.HasPrefix(te.Output, "panic: test timed out after") {
-			fmt.Fprintf(results, "%s: %s\n", te.Package, te.Output)
-			ok = false
-		} else if te.Action == "output" && coverageRe.MatchString(te.Output) {
-			submatches := coverageRe.FindAllStringSubmatch(te.Output, -1)
-			if submatches[0][1] != "100.0" {
-				fmt.Fprintf(results, "%s: test coverage is not 100.0%%\n", te.Package)
-				ok = false
-			}
-		}
+	return
+}
 
+// operation is a operation that can deny a git from proceding.
+type operation interface {
+	// run executes a operation and returns the message. If the result of the execution doesn't
+	// denies git then the empty string will be returned in message.
+	run(ctx context.Context) (message string, err error)
+}
+
+// vet is a operation that executes "go vet ./...".
+type vet struct {
+	// packagesPath contains the path to be used for running the vet.
+	packagesPath string
+	os           operatingSystem
+}
+
+// newVet creates a vet.
+func newVet() operation {
+	return vet{packagesPath: "." + string(os.PathSeparator) + "...", os: defaultOS}
+}
+
+// run executes "go vet ./..." and returns the message. If the result of the execution
+// doesn't denies git then the empty string will be returned, otherwise a message explaining
+// why will be returned.
+func (v vet) run(ctx context.Context) (message string, err error) {
+	buf := new(bytes.Buffer)
+	buf.WriteString("\tfrom go vet\n")
+
+	cmd := v.os.newCmd(ctx, nil, buf, "go", "vet", v.packagesPath)
+	err = cmd.Run()
+	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
+		return buf.String(), nil
+	} else if err != nil {
+		return
 	}
 
 	return
@@ -158,58 +135,262 @@ type testEvent struct {
 	Output  string
 }
 
-// verifyIfHasTests verify for each package if it need and has tests.
-func verifyIfHasTests(results *bytes.Buffer) (ok bool, err error) {
-	cfg := &packages.Config{
-		Mode:  packages.NeedName | packages.NeedSyntax | packages.NeedTypesInfo,
-		Tests: true,
+type testResultKind int
+
+const (
+	testResultPass testResultKind = iota
+	testResultFail
+	testResultTimeout
+	testResultCoverageNot100PerCent
+)
+
+type testResult struct {
+	kind    testResultKind
+	message string
+}
+
+// tests is a operation that executes the tests.
+type tests struct {
+	// timeoutForEachPackage is the timeout of the tests of each package.
+	timeoutForEachPackage time.Duration
+	// packagesPath contains the path to be used for running the tests.
+	packagesPath string
+	// coverageRe is for determining the coverage of the tests of a package.
+	coverageRe *regexp.Regexp
+	os         operatingSystem
+}
+
+// newTests creates a tests.
+func newTests(timeoutForEachPackage time.Duration) operation {
+	return tests{
+		timeoutForEachPackage: timeoutForEachPackage,
+		packagesPath:          "." + string(os.PathSeparator) + "...",
+		coverageRe:            regexp.MustCompile(`^coverage: (\d{1,3}(?:\.\d)?)% of statements\n$`),
+		os:                    defaultOS,
 	}
-	pkgs, err := packages.Load(cfg, checkHasTestsPackagesPath)
+}
+
+// run executes the tests and returns the message. If the result of the execution doesn't
+// denies Git then the empty string will be returned, otherwise a message explaining why will be returned.
+func (t tests) run(ctx context.Context) (message string, err error) {
+	// even when the tests reports 100.0% of coverage some statements may not have been executed.
+	// Then we use the coverprofile to verifiy whether all statements where executed.
+	cpf, err := t.os.createTemp("", "coverprofile*.out")
 	if err != nil {
-		return ok, err
+		return
+	}
+	cpf.Close()                   // we dont need the file now.
+	defer t.os.remove(cpf.Name()) // we assume that the file will not be removed automatically by the system.
+
+	to := t.timeoutForEachPackage.String()
+	stdout := new(bytes.Buffer)
+	cmd := t.os.newCmd(
+		ctx, stdout, nil,
+		"go", "test", "-json", "-timeout="+to, "-vet=off", "-cover", "-failfast", "-coverprofile="+cpf.Name(), t.packagesPath,
+	)
+
+	err = cmd.Run()
+	if exitError := new(exec.ExitError); err != nil && !errors.As(err, &exitError) {
+		return
 	}
 
-	var needTest []string
-	var withTests []string
+	var results []testResult
+	dec := json.NewDecoder(stdout)
+	for {
+		result, err := t.next(dec)
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			return "", err
+		}
 
-	for _, pkg := range pkgs {
-		if strings.HasSuffix(pkg.PkgPath, ".test") {
+		if result.kind == testResultPass {
 			continue
 		}
-		if !needTests(pkg) {
-			continue
-		}
-		needTest = append(needTest, pkg.PkgPath)
-		if hasTests(pkg) {
-			withTests = append(withTests, pkg.PkgPath)
+
+		results = append(results, result)
+
+		select {
+		case <-ctx.Done():
+			return "", context.Cause(ctx)
+		default:
 		}
 	}
 
-	ok = true
-	for _, pkg := range pkgs {
-		if strings.HasSuffix(pkg.PkgPath, ".test") {
-			continue
+	return t.message(ctx, results, cpf.Name())
+}
+
+// message creates the message corresponding to the results of the execution of the tests and the coverprofile generated.
+func (t tests) message(ctx context.Context, rs []testResult, coverProfileName string) (string, error) {
+	if len(rs) == 0 { // all tests passed and 100.0% of coverage
+		return t.messageFromCoverProfile(ctx, coverProfileName)
+	}
+
+	buf := new(bytes.Buffer)
+	buf.WriteString("\tfrom executing the tests\n")
+
+	// if the tests failed then the coverage can be wrong because of the -failfast option
+	failed := slices.ContainsFunc(rs, func(r testResult) bool { return r.kind == testResultFail || r.kind == testResultTimeout })
+	// we assume that the following loops will run fast so we do not test ctx.Done()
+	if failed {
+		for i := range rs {
+			if rs[i].kind == testResultCoverageNot100PerCent {
+				continue
+			}
+			buf.WriteString(rs[i].message)
 		}
-		if slices.Contains(needTest, pkg.PkgPath) && !slices.Contains(withTests, pkg.PkgPath) {
-			fmt.Fprintf(results, "%s has no tests\n", pkg.PkgPath)
-			ok = false
+	} else {
+		for i := range rs {
+			if rs[i].kind == testResultCoverageNot100PerCent {
+				buf.WriteString(rs[i].message)
+			}
 		}
+	}
+
+	return buf.String(), nil
+}
+
+// messageFromCoverProfile creates the message corresponding to the coverprofile generated.
+func (t tests) messageFromCoverProfile(ctx context.Context, fileName string) (m string, err error) {
+	buf := new(bytes.Buffer)
+	buf.WriteString("\tfrom cover profile\n")
+
+	f, err := t.os.open(fileName)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	var hasStmtNotExecuted bool
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasSuffix(line, "0") {
+			hasStmtNotExecuted = true
+			buf.WriteString(line)
+		}
+
+		select {
+		case <-ctx.Done():
+			return "", context.Cause(ctx)
+		default:
+		}
+	}
+
+	if err = sc.Err(); err != nil {
+		return
+	}
+
+	if hasStmtNotExecuted {
+		return buf.String(), nil
+	}
+	return
+}
+
+// next decodes an event and returns their meaning. next returns io.EOF if dec returns it.
+func (t tests) next(dec *json.Decoder) (result testResult, err error) {
+	var te testEvent
+	if err = dec.Decode(&te); err != nil {
+		return
+	}
+
+	if te.Action == "fail" && te.Test != "" {
+		result = testResult{kind: testResultFail, message: fmt.Sprintf("%s: %s failed\n", te.Package, te.Test)}
+		return
+	}
+
+	if te.Action == "output" && strings.HasPrefix(te.Output, "panic: test timed out after") {
+		result = testResult{kind: testResultTimeout, message: fmt.Sprintf("%s: %s\n", te.Package, te.Output)}
+		return
+	}
+
+	if te.Action == "output" && t.coverageRe.MatchString(te.Output) {
+		submatches := t.coverageRe.FindAllStringSubmatch(te.Output, -1)
+		if submatches[0][1] == "100.0" {
+			return
+		}
+		result = testResult{kind: testResultCoverageNot100PerCent, message: fmt.Sprintf("%s: test coverage is not 100.0%%\n", te.Package)}
+		return
 	}
 
 	return
 }
 
-// needTests reports wheter pkg need tests.
-func needTests(pkg *packages.Package) bool {
-	for _, s := range pkg.Syntax {
-		f := pkg.Fset.File(s.FileStart)
-		if strings.HasSuffix(f.Name(), "_test.go") {
+// thereAreTests is a operation that check if there are tests.
+type thereAreTests struct {
+	// packagesPath contains the path to be used for running the vet.
+	packagesPath string
+}
+
+// newThereAreTests creates a there are tests.
+func newThereAreTests() operation {
+	return thereAreTests{packagesPath: "." + string(os.PathSeparator) + "..."}
+}
+
+// run check if a package need and has tests and returns the message.
+// If the result of the execution doesn't denies Git then the empty string
+// will be returned, otherwise a message explaining why will be returned.
+func (t thereAreTests) run(ctx context.Context) (message string, err error) {
+	buf := new(bytes.Buffer)
+	buf.WriteString("\tfrom checking if there are tests\n")
+
+	cfg := &packages.Config{
+		Context: ctx,
+		Mode:    packages.NeedName | packages.NeedSyntax | packages.NeedTypesInfo,
+		Tests:   true,
+	}
+	pkgs, err := packages.Load(cfg, t.packagesPath)
+	if err != nil {
+		return
+	}
+
+	// we assume the following code will run quickly, so we don't test ctx.Done.
+	pkgsByDir := make(map[string][]*packages.Package)
+	var dirs []string
+	for _, pkg := range pkgs {
+		if len(pkg.Errors) > 0 {
+			return "", t.joinErrors(pkg.Errors...)
+		}
+		pkgsByDir[pkg.Dir] = append(pkgsByDir[pkg.Dir], pkg)
+		if !slices.Contains(dirs, pkg.Dir) {
+			dirs = append(dirs, pkg.Dir)
+		}
+	}
+
+	var denyGit bool
+	for _, dir := range dirs {
+		if t.need(pkgsByDir[dir]) && !t.has(pkgsByDir[dir]) {
+			fmt.Fprintf(buf, "%s has no tests\n", t.pkgPath(pkgsByDir[dir]))
+			denyGit = true
+		}
+	}
+
+	if denyGit {
+		return buf.String(), nil
+	}
+
+	return
+}
+
+// TODO: a dir can have more than one package, treat this case.
+
+// need reports wheter pkg need tests. A directory may have more than one package because of the tests (see the documentation
+// of packages.Config.Tests).
+func (t thereAreTests) need(pkgsOfDir []*packages.Package) bool {
+	for _, pkg := range pkgsOfDir {
+		if strings.HasSuffix(pkg.PkgPath, ".test") {
 			continue
 		}
+		for _, s := range pkg.Syntax {
+			f := pkg.Fset.File(s.FileStart)
+			if strings.HasSuffix(f.Name(), "_test.go") {
+				continue
+			}
 
-		for _, d := range s.Decls {
-			if _, ok := d.(*ast.FuncDecl); ok {
-				return true
+			for _, d := range s.Decls {
+				if _, ok := d.(*ast.FuncDecl); ok {
+					return true
+				}
 			}
 		}
 	}
@@ -217,31 +398,46 @@ func needTests(pkg *packages.Package) bool {
 	return false
 }
 
-// hasTests reports wheter pkg has tests.
-func hasTests(pkg *packages.Package) bool {
-	for _, s := range pkg.Syntax {
-		f := pkg.Fset.File(s.FileStart)
-		if !strings.HasSuffix(f.Name(), "_test.go") {
-			continue
-		}
-
-		for _, d := range s.Decls {
-			f, ok := d.(*ast.FuncDecl)
-			if !ok {
+// has reports wheter the directory has tests. A directory may have more than one package because of the tests (see the documentation
+// of packages.Config.Tests).
+func (t thereAreTests) has(pkgsOfDir []*packages.Package) bool {
+	for _, pkg := range pkgsOfDir {
+		for _, s := range pkg.Syntax {
+			f := pkg.Fset.File(s.FileStart)
+			if !strings.HasSuffix(f.Name(), "_test.go") {
 				continue
 			}
-			if isTestFunction(pkg.TypesInfo, f) {
-				return true
+
+			for _, d := range s.Decls {
+				f, ok := d.(*ast.FuncDecl)
+				if !ok {
+					continue
+				}
+				if t.isTestFunction(pkg.TypesInfo, f) {
+					return true
+				}
 			}
 		}
 	}
 
 	return false
+}
+
+// pkgPath return the path of the nontest package in the directory. If there aren't such a package then it returns
+// the path of the first package in pkgsByDir.
+func (t thereAreTests) pkgPath(pkgsByDir []*packages.Package) string {
+	for _, pkg := range pkgsByDir {
+		if !strings.HasSuffix(pkg.PkgPath, ".test") && !strings.HasSuffix(pkg.PkgPath, "_test") {
+			return pkg.PkgPath
+		}
+	}
+
+	return pkgsByDir[0].PkgPath
 }
 
 // isTestFunction reports wheter f has the signature of a test function.
-func isTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
-	if isFuzzTestFunction(ti, f) {
+func (t thereAreTests) isTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
+	if t.isFuzzTestFunction(ti, f) {
 		return true
 	}
 
@@ -249,7 +445,7 @@ func isTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
 		return false
 	}
 
-	if startWithLowerCaseLetter(strings.TrimPrefix(f.Name.Name, "Test")) {
+	if t.startWithLowerCaseLetter(strings.TrimPrefix(f.Name.Name, "Test")) {
 		return false
 	}
 
@@ -280,11 +476,11 @@ func isTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
 }
 
 // isFuzzTestFunction reports wheter f has the signature of a fuzz test function.
-func isFuzzTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
+func (t thereAreTests) isFuzzTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
 	if !strings.HasPrefix(f.Name.Name, "Fuzz") {
 		return false
 	}
-	if startWithLowerCaseLetter(strings.TrimPrefix(f.Name.Name, "Fuzz")) {
+	if t.startWithLowerCaseLetter(strings.TrimPrefix(f.Name.Name, "Fuzz")) {
 		return false
 	}
 
@@ -315,7 +511,56 @@ func isFuzzTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
 }
 
 // startWithLowerCaseLetter reports if s start with a lower case letter.
-func startWithLowerCaseLetter(s string) bool {
+func (t thereAreTests) startWithLowerCaseLetter(s string) bool {
 	r, _ := utf8.DecodeRuneInString(s)
 	return unicode.IsLower(r)
+}
+
+// joinErrors concatenates the error messages of the errors in errs, with a new line between
+// each message, and returns the error with it.
+func (t thereAreTests) joinErrors(errs ...packages.Error) error {
+	var messages []string
+
+	for _, err := range errs {
+		messages = append(messages, err.Error())
+	}
+
+	return errors.New(strings.Join(messages, "\n"))
+}
+
+var defaultOS = operatingSystem{
+	stdout:     os.Stdout,
+	exit:       os.Exit,
+	createTemp: os.CreateTemp,
+	remove:     os.Remove,
+	open: func(name string) (io.ReadCloser, error) {
+		return os.Open(name)
+	},
+	newCmd: func(ctx context.Context, stdout, stderr io.Writer, name string, args ...string) command {
+		cmd := exec.CommandContext(ctx, name, args...)
+		cmd.Stdout = stdout
+		cmd.Stderr = stderr
+		return cmd
+	},
+}
+
+// opSystem is for allowing the tests to change the behavior of the packages os and exec.
+type operatingSystem struct {
+	// stdout is for os.Stdout.
+	stdout io.Writer
+	// exit is for os.Exit.
+	exit func(code int)
+	// createTemp is for the os.CreatTemp function.
+	createTemp func(dir string, pattern string) (*os.File, error)
+	// remove is for the os.Remove function.
+	remove func(name string) error
+	// open is for the os.Open function.
+	open func(name string) (io.ReadCloser, error)
+	// newCmd is for exec.CommandContext
+	newCmd func(ctx context.Context, stdout, stderr io.Writer, name string, args ...string) command
+}
+
+// command is for allowing the tests to change the behavior of the exec.Cmd struct.
+type command interface {
+	Run() error
 }
