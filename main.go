@@ -6,8 +6,8 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -26,42 +26,35 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
-// stdout contains the standard output. We use it for allow tests to change the destination of the output.
-var stdout io.Writer = os.Stdout
-
-// exit contains the os.Exit function. We use it for allow tests to change what the exit do.
-var exit = os.Exit
-
 func main() {
-	denyGit, message := run(
-		newVet(),
-		newTests(30*time.Second),
-		newThereAreTests(),
-	)
+	denyGit, message := run()
 	if denyGit {
-		fmt.Fprintln(stdout, message)
-		exit(1)
+		fmt.Fprintln(defaultOS.stdout, message)
+		defaultOS.exit(1)
 	}
 }
 
 // run executes the operations.
-func run(ops ...operation) (denyGit bool, message string) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+func run() (denyGit bool, message string) {
+	ops := []operation{
+		newVet(),
+		newTests(30 * time.Second),
+		newThereAreTests(),
+	}
 
 	// operationResult is the result of the method run of a operation.
 	type operationResult struct {
-		message string
-		err     error
+		message  string
+		position int
+		err      error
 	}
 
 	chOperationResult := make(chan operationResult, len(ops))
 	var wg sync.WaitGroup
-	for _, op := range ops {
-		op := op
+	for pos, op := range ops {
 		wg.Go(func() {
-			message, err := op.run(ctx)
-			chOperationResult <- operationResult{message: message, err: err}
+			message, pos, err := op.run(pos)
+			chOperationResult <- operationResult{message: message, position: pos, err: err}
 		})
 	}
 
@@ -70,31 +63,33 @@ func run(ops ...operation) (denyGit bool, message string) {
 		close(chOperationResult)
 	}()
 
-	var errs []error
+	results := make([]operationResult, len(ops))
+
 	for or := range chOperationResult {
-		if or.err != nil {
-			errs = append(errs, or.err)
-		} else if or.message != "" {
-			message = or.message
+		// the position is used for allow the results to always appear in the same order.
+		results[or.position] = or
+	}
+
+	var mb strings.Builder
+	for _, res := range results {
+		if res.err != nil {
+			mb.WriteString(res.err.Error())
 			denyGit = true
-			cancel()
-			break
+		} else if res.message != "" {
+			mb.WriteString(res.message)
+			denyGit = true
 		}
 	}
 
-	if !denyGit && len(errs) > 0 {
-		denyGit = true
-		message = errors.Join(errs...).Error()
-	}
-
-	return
+	return denyGit, mb.String()
 }
 
 // operation is a operation that can deny a git from proceding.
 type operation interface {
 	// run executes a operation and returns the message. If the result of the execution doesn't
-	// denies git then the empty string will be returned in message.
-	run(ctx context.Context) (message string, err error)
+	// denies git then the empty string will be returned in message. pos will be equals position.
+	// We use pos to always display the messages in the same order.
+	run(position int) (message string, pos int, err error)
 }
 
 // vet is a operation that executes "go vet ./...".
@@ -104,26 +99,178 @@ type vet struct {
 	os           operatingSystem
 }
 
-// newVet creates a vet.
 func newVet() operation {
 	return vet{packagesPath: "." + string(os.PathSeparator) + "...", os: defaultOS}
 }
 
-// run executes "go vet ./..." and returns the message. If the result of the execution
-// doesn't denies git then the empty string will be returned, otherwise a message explaining
-// why will be returned.
-func (v vet) run(ctx context.Context) (message string, err error) {
+// run executes "go vet ./...".
+func (v vet) run(position int) (message string, pos int, err error) {
+	pos = position
 	buf := new(bytes.Buffer)
 	buf.WriteString("\tfrom go vet\n")
 
-	cmd := v.os.newCmd(ctx, nil, buf, "go", "vet", v.packagesPath)
+	cmd := v.os.newCmd(nil, buf, "go", "vet", v.packagesPath)
 	err = cmd.Run()
 	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
-		return buf.String(), nil
-	} else if err != nil {
+		return buf.String(), pos, nil
+	}
+
+	return
+}
+
+// tests is a operation that executes the tests.
+type tests struct {
+	timeoutForEachPackage time.Duration
+	// packagesPath contains the path to be used for running the tests.
+	packagesPath string
+	// coverageRe is for determining the coverage of the tests of a package.
+	coverageRe *regexp.Regexp
+	os         operatingSystem
+}
+
+// newTests creates a tests.
+func newTests(timeoutForEachPackage time.Duration) operation {
+	return tests{
+		timeoutForEachPackage: timeoutForEachPackage,
+		packagesPath:          "." + string(os.PathSeparator) + "...",
+		coverageRe:            regexp.MustCompile(`^coverage: (\d{1,3}(?:\.\d)?)% of statements\n$`),
+		os:                    defaultOS,
+	}
+}
+
+// run executes the tests of the package and their subpackages.
+func (t tests) run(position int) (message string, pos int, err error) {
+	// even when the tests reports 100.0% of coverage some statements may not have been executed.
+	// Then we use the coverprofile to verifiy whether all statements where executed.
+	pos = position
+	cpf, err := t.os.createTemp("", "coverprofile*.out")
+	if err != nil {
+		return
+	}
+	cpf.Close()                   // we dont need the file now.
+	defer t.os.remove(cpf.Name()) // we assume that the file will not be removed automatically by the system.
+
+	to := t.timeoutForEachPackage.String()
+	stdout := new(bytes.Buffer)
+	cmd := t.os.newCmd(
+		stdout, nil,
+		"go", "test", "-json", "-timeout="+to, "-vet=off", "-cover", "-failfast", "-coverprofile="+cpf.Name(), t.packagesPath,
+	)
+
+	err = cmd.Run()
+	if exitError := new(exec.ExitError); err != nil && !errors.As(err, &exitError) {
 		return
 	}
 
+	results, err := t.results(stdout)
+	if err != nil {
+		return
+	}
+
+	message, err = t.message(results, cpf.Name())
+	return
+}
+
+// results decodes r as a []testResult, but only results whose kind is not testResultPass are returned.
+func (t tests) results(r io.Reader) ([]testResult, error) {
+	var rs []testResult
+	dec := jsontext.NewDecoder(r)
+	for {
+		var te testEvent
+		if err := json.UnmarshalDecode(dec, &te); err == io.EOF {
+			return rs, nil
+		} else if err != nil {
+			return nil, err
+		}
+		result := t.result(te)
+		if result.kind == testResultPass {
+			continue
+		}
+		rs = append(rs, result)
+	}
+}
+
+// next decodes an event and returns their meaning
+func (t tests) result(te testEvent) (result testResult) {
+	if te.Action == "fail" && te.Test != "" {
+		result = testResult{kind: testResultFail, message: fmt.Sprintf("%s: %s failed\n", te.Package, te.Test)}
+		return
+	}
+
+	if te.Action == "output" && strings.HasPrefix(te.Output, "panic: test timed out after") {
+		result = testResult{kind: testResultTimeout, message: fmt.Sprintf("%s: %s\n", te.Package, te.Output)}
+		return
+	}
+
+	if te.Action == "output" && t.coverageRe.MatchString(te.Output) {
+		submatches := t.coverageRe.FindAllStringSubmatch(te.Output, -1)
+		if submatches[0][1] == "100.0" {
+			return
+		}
+		result = testResult{kind: testResultCoverageNot100PerCent, message: fmt.Sprintf("%s: test coverage is not 100.0%%\n", te.Package)}
+		return
+	}
+
+	return
+}
+
+// message creates the message corresponding to the results of the execution of the tests and the coverprofile generated.
+func (t tests) message(rs []testResult, coverProfileName string) (string, error) {
+	if len(rs) == 0 { // all tests passed and 100.0% of coverage
+		return t.messageFromCoverProfile(coverProfileName)
+	}
+
+	buf := new(bytes.Buffer)
+	buf.WriteString("\tfrom executing the tests\n")
+
+	// if the tests failed then the coverage can be wrong because of the -failfast option
+	failed := slices.ContainsFunc(rs, func(r testResult) bool { return r.kind == testResultFail || r.kind == testResultTimeout })
+	if failed {
+		for i := range rs {
+			if rs[i].kind == testResultCoverageNot100PerCent {
+				continue
+			}
+			buf.WriteString(rs[i].message)
+		}
+	} else {
+		for i := range rs {
+			if rs[i].kind == testResultCoverageNot100PerCent {
+				buf.WriteString(rs[i].message)
+			}
+		}
+	}
+
+	return buf.String(), nil
+}
+
+// messageFromCoverProfile creates the message corresponding to the coverprofile generated.
+func (t tests) messageFromCoverProfile(fileName string) (m string, err error) {
+	buf := new(bytes.Buffer)
+	buf.WriteString("\tfrom cover profile\n")
+
+	f, err := t.os.open(fileName)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	var hasStmtNotExecuted bool
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasSuffix(line, "0") {
+			hasStmtNotExecuted = true
+			buf.WriteString(line)
+		}
+	}
+
+	if err = sc.Err(); err != nil {
+		return
+	}
+
+	if hasStmtNotExecuted {
+		return buf.String(), nil
+	}
 	return
 }
 
@@ -149,207 +296,37 @@ type testResult struct {
 	message string
 }
 
-// tests is a operation that executes the tests.
-type tests struct {
-	// timeoutForEachPackage is the timeout of the tests of each package.
-	timeoutForEachPackage time.Duration
-	// packagesPath contains the path to be used for running the tests.
-	packagesPath string
-	// coverageRe is for determining the coverage of the tests of a package.
-	coverageRe *regexp.Regexp
-	os         operatingSystem
-}
-
-// newTests creates a tests.
-func newTests(timeoutForEachPackage time.Duration) operation {
-	return tests{
-		timeoutForEachPackage: timeoutForEachPackage,
-		packagesPath:          "." + string(os.PathSeparator) + "...",
-		coverageRe:            regexp.MustCompile(`^coverage: (\d{1,3}(?:\.\d)?)% of statements\n$`),
-		os:                    defaultOS,
-	}
-}
-
-// run executes the tests and returns the message. If the result of the execution doesn't
-// denies Git then the empty string will be returned, otherwise a message explaining why will be returned.
-func (t tests) run(ctx context.Context) (message string, err error) {
-	// even when the tests reports 100.0% of coverage some statements may not have been executed.
-	// Then we use the coverprofile to verifiy whether all statements where executed.
-	cpf, err := t.os.createTemp("", "coverprofile*.out")
-	if err != nil {
-		return
-	}
-	cpf.Close()                   // we dont need the file now.
-	defer t.os.remove(cpf.Name()) // we assume that the file will not be removed automatically by the system.
-
-	to := t.timeoutForEachPackage.String()
-	stdout := new(bytes.Buffer)
-	cmd := t.os.newCmd(
-		ctx, stdout, nil,
-		"go", "test", "-json", "-timeout="+to, "-vet=off", "-cover", "-failfast", "-coverprofile="+cpf.Name(), t.packagesPath,
-	)
-
-	err = cmd.Run()
-	if exitError := new(exec.ExitError); err != nil && !errors.As(err, &exitError) {
-		return
-	}
-
-	var results []testResult
-	dec := json.NewDecoder(stdout)
-	for {
-		result, err := t.next(dec)
-		if err == io.EOF {
-			break
-		} else if err != nil {
-			return "", err
-		}
-
-		if result.kind == testResultPass {
-			continue
-		}
-
-		results = append(results, result)
-
-		select {
-		case <-ctx.Done():
-			return "", context.Cause(ctx)
-		default:
-		}
-	}
-
-	return t.message(ctx, results, cpf.Name())
-}
-
-// message creates the message corresponding to the results of the execution of the tests and the coverprofile generated.
-func (t tests) message(ctx context.Context, rs []testResult, coverProfileName string) (string, error) {
-	if len(rs) == 0 { // all tests passed and 100.0% of coverage
-		return t.messageFromCoverProfile(ctx, coverProfileName)
-	}
-
-	buf := new(bytes.Buffer)
-	buf.WriteString("\tfrom executing the tests\n")
-
-	// if the tests failed then the coverage can be wrong because of the -failfast option
-	failed := slices.ContainsFunc(rs, func(r testResult) bool { return r.kind == testResultFail || r.kind == testResultTimeout })
-	// we assume that the following loops will run fast so we do not test ctx.Done()
-	if failed {
-		for i := range rs {
-			if rs[i].kind == testResultCoverageNot100PerCent {
-				continue
-			}
-			buf.WriteString(rs[i].message)
-		}
-	} else {
-		for i := range rs {
-			if rs[i].kind == testResultCoverageNot100PerCent {
-				buf.WriteString(rs[i].message)
-			}
-		}
-	}
-
-	return buf.String(), nil
-}
-
-// messageFromCoverProfile creates the message corresponding to the coverprofile generated.
-func (t tests) messageFromCoverProfile(ctx context.Context, fileName string) (m string, err error) {
-	buf := new(bytes.Buffer)
-	buf.WriteString("\tfrom cover profile\n")
-
-	f, err := t.os.open(fileName)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	var hasStmtNotExecuted bool
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := sc.Text()
-		if strings.HasSuffix(line, "0") {
-			hasStmtNotExecuted = true
-			buf.WriteString(line)
-		}
-
-		select {
-		case <-ctx.Done():
-			return "", context.Cause(ctx)
-		default:
-		}
-	}
-
-	if err = sc.Err(); err != nil {
-		return
-	}
-
-	if hasStmtNotExecuted {
-		return buf.String(), nil
-	}
-	return
-}
-
-// next decodes an event and returns their meaning. next returns io.EOF if dec returns it.
-func (t tests) next(dec *json.Decoder) (result testResult, err error) {
-	var te testEvent
-	if err = dec.Decode(&te); err != nil {
-		return
-	}
-
-	if te.Action == "fail" && te.Test != "" {
-		result = testResult{kind: testResultFail, message: fmt.Sprintf("%s: %s failed\n", te.Package, te.Test)}
-		return
-	}
-
-	if te.Action == "output" && strings.HasPrefix(te.Output, "panic: test timed out after") {
-		result = testResult{kind: testResultTimeout, message: fmt.Sprintf("%s: %s\n", te.Package, te.Output)}
-		return
-	}
-
-	if te.Action == "output" && t.coverageRe.MatchString(te.Output) {
-		submatches := t.coverageRe.FindAllStringSubmatch(te.Output, -1)
-		if submatches[0][1] == "100.0" {
-			return
-		}
-		result = testResult{kind: testResultCoverageNot100PerCent, message: fmt.Sprintf("%s: test coverage is not 100.0%%\n", te.Package)}
-		return
-	}
-
-	return
-}
-
-// thereAreTests is a operation that check if there are tests.
+// thereAreTests is a operation that check if there are tests. But if the package dont
+// need tests then a message is not generated for it.
 type thereAreTests struct {
 	// packagesPath contains the path to be used for running the vet.
 	packagesPath string
 }
 
-// newThereAreTests creates a there are tests.
 func newThereAreTests() operation {
 	return thereAreTests{packagesPath: "." + string(os.PathSeparator) + "..."}
 }
 
-// run check if a package need and has tests and returns the message.
-// If the result of the execution doesn't denies Git then the empty string
-// will be returned, otherwise a message explaining why will be returned.
-func (t thereAreTests) run(ctx context.Context) (message string, err error) {
+// run check if a packagem and your subpackages, need and has tests.
+func (t thereAreTests) run(position int) (message string, pos int, err error) {
+	pos = position
 	buf := new(bytes.Buffer)
 	buf.WriteString("\tfrom checking if there are tests\n")
 
 	cfg := &packages.Config{
-		Context: ctx,
-		Mode:    packages.NeedName | packages.NeedSyntax | packages.NeedTypesInfo,
-		Tests:   true,
+		Mode:  packages.NeedName | packages.NeedSyntax | packages.NeedTypesInfo,
+		Tests: true,
 	}
 	pkgs, err := packages.Load(cfg, t.packagesPath)
 	if err != nil {
 		return
 	}
 
-	// we assume the following code will run quickly, so we don't test ctx.Done.
 	pkgsByDir := make(map[string][]*packages.Package)
 	var dirs []string
 	for _, pkg := range pkgs {
 		if len(pkg.Errors) > 0 {
-			return "", t.joinErrors(pkg.Errors...)
+			return "", pos, t.joinErrors(pkg.Errors...)
 		}
 		pkgsByDir[pkg.Dir] = append(pkgsByDir[pkg.Dir], pkg)
 		if !slices.Contains(dirs, pkg.Dir) {
@@ -366,17 +343,16 @@ func (t thereAreTests) run(ctx context.Context) (message string, err error) {
 	}
 
 	if denyGit {
-		return buf.String(), nil
+		return buf.String(), pos, nil
 	}
 
 	return
 }
 
-// TODO: a dir can have more than one package, treat this case.
-
 // need reports wheter pkg need tests. A directory may have more than one package because of the tests (see the documentation
 // of packages.Config.Tests).
 func (t thereAreTests) need(pkgsOfDir []*packages.Package) bool {
+	// We dont support folders with multiple non-test packages.
 	for _, pkg := range pkgsOfDir {
 		if strings.HasSuffix(pkg.PkgPath, ".test") {
 			continue
@@ -398,8 +374,7 @@ func (t thereAreTests) need(pkgsOfDir []*packages.Package) bool {
 	return false
 }
 
-// has reports wheter the directory has tests. A directory may have more than one package because of the tests (see the documentation
-// of packages.Config.Tests).
+// has reports wheter the directory has tests.
 func (t thereAreTests) has(pkgsOfDir []*packages.Package) bool {
 	for _, pkg := range pkgsOfDir {
 		for _, s := range pkg.Syntax {
@@ -423,7 +398,7 @@ func (t thereAreTests) has(pkgsOfDir []*packages.Package) bool {
 	return false
 }
 
-// pkgPath return the path of the nontest package in the directory. If there aren't such a package then it returns
+// pkgPath return the path of the non test package in the directory. If there aren't such a package then it returns
 // the path of the first package in pkgsByDir.
 func (t thereAreTests) pkgPath(pkgsByDir []*packages.Package) string {
 	for _, pkg := range pkgsByDir {
@@ -536,8 +511,8 @@ var defaultOS = operatingSystem{
 	open: func(name string) (io.ReadCloser, error) {
 		return os.Open(name)
 	},
-	newCmd: func(ctx context.Context, stdout, stderr io.Writer, name string, args ...string) command {
-		cmd := exec.CommandContext(ctx, name, args...)
+	newCmd: func(stdout, stderr io.Writer, name string, args ...string) command {
+		cmd := exec.Command(name, args...)
 		cmd.Stdout = stdout
 		cmd.Stderr = stderr
 		return cmd
@@ -557,7 +532,7 @@ type operatingSystem struct {
 	// open is for the os.Open function.
 	open func(name string) (io.ReadCloser, error)
 	// newCmd is for exec.CommandContext
-	newCmd func(ctx context.Context, stdout, stderr io.Writer, name string, args ...string) command
+	newCmd func(stdout, stderr io.Writer, name string, args ...string) command
 }
 
 // command is for allowing the tests to change the behavior of the exec.Cmd struct.

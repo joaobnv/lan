@@ -4,5 +4,5 @@ package stderr
 // Copyright (c) 2025, João Breno. See the license.
 
 func main() {
-	return 10
+	return 1 / 0 // syntax error since Go 1.1
 }

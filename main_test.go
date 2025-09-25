@@ -4,7 +4,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -28,15 +27,15 @@ func TestMainTestsFail(t *testing.T) {
 	t.Chdir(path.Join("testdata", "testfail"))
 	var exitCode int
 
-	stdout = new(bytes.Buffer)
-	exit = func(code int) {
+	defaultOS.stdout = new(bytes.Buffer)
+	defaultOS.exit = func(code int) {
 		exitCode = code
 	}
 
 	main()
 
 	expectedMessage := "\tfrom executing the tests\ntestfail: TestSum failed\n\n"
-	if r := stdout.(*bytes.Buffer).String(); r != expectedMessage {
+	if r := defaultOS.stdout.(*bytes.Buffer).String(); r != expectedMessage {
 		t.Errorf("output = %q, want %q", r, expectedMessage)
 	}
 
@@ -51,14 +50,14 @@ func TestMainTestsStderr(t *testing.T) {
 
 	var exitCode int
 
-	stdout = new(bytes.Buffer)
-	exit = func(code int) {
+	defaultOS.stdout = new(bytes.Buffer)
+	defaultOS.exit = func(code int) {
 		exitCode = code
 	}
 
 	main()
 
-	if stdout.(*bytes.Buffer).Len() == 0 {
+	if defaultOS.stdout.(*bytes.Buffer).Len() == 0 {
 		t.Errorf("without stderr")
 	}
 
@@ -87,8 +86,10 @@ func TestCmdRunError(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(fmt.Sprintf("%T", c.op), func(t *testing.T) {
-			if _, err := c.op.run(context.Background()); err == nil {
+			if _, pos, err := c.op.run(10); err == nil {
 				t.Errorf("run did not return a error")
+			} else if pos != 10 {
+				t.Errorf("position (%d) != pos (%d)", 10, pos)
 			}
 		})
 	}
@@ -101,9 +102,11 @@ func TestTestsTimeout(t *testing.T) {
 	cleanTestCache(t)
 
 	op := newTests(100 * time.Nanosecond)
-	message, err := op.run(t.Context())
+	message, pos, err := op.run(12)
 	if err != nil {
 		t.Fatal(err)
+	} else if pos != 12 {
+		t.Errorf("position (%d) != pos (%d)", 12, pos)
 	}
 
 	expectedMessage := "\tfrom executing the tests\ntimeout: panic: test timed out after 100ns\n\n"
@@ -119,33 +122,15 @@ func TestPackageLoadError(t *testing.T) {
 
 	op := newThereAreTests().(thereAreTests) // I think \x00 is not allowed in Linux and Windows.
 	op.packagesPath = "\x00<\\/>"
-	if _, err := op.run(t.Context()); err == nil {
+	if _, pos, err := op.run(22); err == nil {
 		t.Errorf("err = nil, want an error explaining that the path is invalid")
+	} else if pos != 22 {
+		t.Errorf("position (%d) != pos (%d)", 22, pos)
 	}
 }
 
-// tests the case where the operation returns an error to the run function.
-func TestRunError(t *testing.T) {
-	t.Chdir(path.Join("testdata", "testok"))
-
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("PATH", wd)
-
-	denyCommit, message := run(newVet())
-	if !denyCommit {
-		t.Errorf("denyCommit = false, want true")
-	}
-
-	if message == "" {
-		t.Errorf("message = \"\", want the error message")
-	}
-}
-
-func TestCreateTempError_tests(t *testing.T) {
+// tests the case where the createTemp method returns a error.
+func TestCreateTempError(t *testing.T) {
 	t.Chdir(path.Join("testdata", "testok"))
 
 	op := newTests(1 * time.Second).(tests)
@@ -155,13 +140,17 @@ func TestCreateTempError_tests(t *testing.T) {
 	}
 	op.os.remove = nil
 
-	if _, err := op.run(t.Context()); err == nil {
+	if _, pos, err := op.run(1); err == nil {
 		t.Errorf("err = nil")
 	} else if err.Error() != errorMsg {
 		t.Errorf("err.Error() = %q, want %q", err.Error(), errorMsg)
+	} else if pos != 1 {
+		t.Errorf("position (%d) != pos (%d)", 1, pos)
 	}
 }
 
+// tests the case where the "go test" command generates a result that is not JSON. To do this
+// we replace the go command by another that dont generates JSON.
 func TestCmdNoJson_tests(t *testing.T) {
 	t.Chdir(path.Join("testdata", "nojson"))
 
@@ -175,29 +164,10 @@ func TestCmdNoJson_tests(t *testing.T) {
 	t.Setenv("PATH", wd)
 
 	op := newTests(1 * time.Millisecond)
-	if _, err = op.run(t.Context()); err == nil {
+	if _, pos, err := op.run(2); err == nil {
 		t.Error("err = nil")
-	}
-}
-
-// test the case where the context is canceled.
-func TestCtxDone_tests(t *testing.T) {
-	t.Chdir(path.Join("testdata", "testok"))
-
-	op := newTests(1 * time.Millisecond).(tests)
-	op.os.newCmd = func(ctx context.Context, stdout, stderr io.Writer, name string, args ...string) command {
-		fmt.Fprintf(stdout, `{"Action": "fail", "Package": "any", "Test": "TestOk", "Output": "-- fail TestOk"}`)
-		return cmd(func() error {
-			return nil
-		})
-	}
-	ctx, cancel := context.WithCancelCause(context.Background())
-	errMsg := "context: error"
-	cancel(errors.New(errMsg))
-	if _, err := op.run(ctx); err == nil {
-		t.Error("err = nil")
-	} else if err.Error() != errMsg {
-		t.Errorf("error = %q, want %q", err.Error(), errMsg)
+	} else if pos != 2 {
+		t.Errorf("position (%d) != pos (%d)", 2, pos)
 	}
 }
 
@@ -210,9 +180,11 @@ func TestCoverProfile_tests(t *testing.T) {
 		return os.Open(path.Join("..", "coverprofile.txt"))
 	}
 
-	msg, err := op.run(t.Context())
+	msg, pos, err := op.run(3)
 	if err != nil {
 		t.Fatal(err)
+	} else if pos != 3 {
+		t.Errorf("position (%d) != pos (%d)", 3, pos)
 	}
 
 	expectedMessage := "\tfrom cover profile\n0"
@@ -231,26 +203,13 @@ func TestCoverProfileOpenError_tests(t *testing.T) {
 		return nil, errors.New(errMsg)
 	}
 
-	_, err := op.run(t.Context())
+	_, pos, err := op.run(4)
 	if err == nil {
 		t.Error("err = nil")
 	} else if err.Error() != errMsg {
 		t.Errorf("err.Error() = %q, want %q", err.Error(), errMsg)
-	}
-}
-
-// test the case where the ctx is done inthe method messageFromCoverProfile.
-func TestMessageFromCoverProfileCtxDone_tests(t *testing.T) {
-	op := newTests(1 * time.Millisecond).(tests)
-	errMsg := "context: error"
-	ctx, cancel := context.WithCancelCause(context.Background())
-	cancel(errors.New(errMsg))
-
-	_, err := op.messageFromCoverProfile(ctx, path.Join("testdata", "coverprofile.txt"))
-	if err == nil {
-		t.Error("err = nil")
-	} else if err.Error() != errMsg {
-		t.Errorf("err.Error() = %q, want %q", err.Error(), errMsg)
+	} else if pos != 4 {
+		t.Errorf("position (%d) != pos (%d)", 4, pos)
 	}
 }
 
@@ -272,15 +231,18 @@ func TestScannerError_tests(t *testing.T) {
 		})), nil
 	}
 
-	_, err := op.run(t.Context())
+	_, pos, err := op.run(5)
 	if err == nil {
 		t.Error("err = nil")
 	} else if err.Error() != errMsg {
 		t.Errorf("err.Error() = %q, want %q", err.Error(), errMsg)
+	} else if pos != 5 {
+		t.Errorf("position (%d) != pos (%d)", 5, pos)
 	}
 }
 
-// test the case where the packages of dir are only of tests.
+// test the case where the packages of dir are only of tests. To do this we run packages.Load
+// and removes the packages that are not of test from the result of Load.
 func TestPkgPath(t *testing.T) {
 	t.Chdir(path.Join("testdata", "testok"))
 
@@ -404,13 +366,16 @@ func TestMessage(t *testing.T) {
 		},
 	}
 
+	position := 22
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Chdir(c.dir)
 
-			message, err := c.op.run(t.Context())
+			message, pos, err := c.op.run(position)
 			if err != nil {
 				t.Fatal(err)
+			} else if pos != position {
+				t.Errorf("position (%d) != pos (%d)", position, pos)
 			}
 
 			if message != c.expectedMessage {
@@ -442,13 +407,16 @@ func TestNotOkIgnoringExactMessageContent(t *testing.T) {
 		},
 	}
 
+	position := 2
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Chdir(c.dir)
 
-			message, err := c.op.run(t.Context())
+			message, pos, err := c.op.run(position)
 			if err != nil {
 				t.Fatal(err)
+			} else if pos != position {
+				t.Errorf("position (%d) != pos (%d)", position, pos)
 			}
 
 			if message == "" {
