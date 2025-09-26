@@ -78,18 +78,16 @@ func run() (denyGit bool, message string) {
 		results[or.pos] = or
 	}
 
-	var mb strings.Builder
+	var messages []string
 	for _, res := range results {
 		if res.err != nil {
-			mb.WriteString(res.err.Error())
-			denyGit = true
+			messages = append(messages, strings.TrimRightFunc(res.err.Error(), unicode.IsSpace))
 		} else if res.message != "" {
-			mb.WriteString(res.message)
-			denyGit = true
+			messages = append(messages, res.message)
 		}
 	}
 
-	return denyGit, mb.String()
+	return len(messages) > 0, strings.Join(messages, "\n")
 }
 
 // operation is a operation that can deny a git from proceding.
