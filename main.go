@@ -27,10 +27,16 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
+// the version of Lan.
+const version = "0.1.0"
+
 func main() {
 	denyGit, message := run()
 	if denyGit {
 		fmt.Fprintln(defaultOS.stdout, message)
+		// I think that showing the version helps the user because Lan does not receive command line parameters
+		// that make it show its version.
+		fmt.Fprint(defaultOS.stdout, "\tlan version: "+version)
 		defaultOS.exit(1)
 	}
 }
@@ -88,8 +94,8 @@ func run() (denyGit bool, message string) {
 
 // operation is a operation that can deny a git from proceding.
 type operation interface {
-	// run executes a operation and returns the message. If the result of the execution doesn't
-	// denies git then the empty string will be returned in message.
+	// run executes a operation and returns the message, without white space at end. If the result of the
+	// execution doesn't denies git then the empty string will be returned in message.
 	run() (message string, err error)
 }
 
@@ -112,7 +118,7 @@ func (v vet) run() (message string, err error) {
 	cmd := v.os.newCmd(nil, buf, "go", "vet", v.packagesPath)
 	err = cmd.Run()
 	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
-		return buf.String(), nil
+		return strings.TrimRightFunc(buf.String(), unicode.IsSpace), nil
 	}
 
 	return
@@ -167,7 +173,7 @@ func (t tests) run() (message string, err error) {
 	}
 
 	message, err = t.message(results, cpf.Name())
-	return
+	return strings.TrimRightFunc(message, unicode.IsSpace), err
 }
 
 // results decodes r as a []testResult, but only results whose kind is not testResultPass are returned.
@@ -341,7 +347,7 @@ func (t thereAreTests) run() (message string, err error) {
 	}
 
 	if denyGit {
-		return buf.String(), nil
+		return strings.TrimRightFunc(buf.String(), unicode.IsSpace), nil
 	}
 
 	return
@@ -569,7 +575,7 @@ func (s staticcheck) run() (message string, err error) {
 			// withTests has precedence, so if there are a function not used by the test and the non-test code
 			// it wont be reported two times.
 			buf.WriteString(results[i].message)
-			return buf.String(), nil
+			return strings.TrimRightFunc(buf.String(), unicode.IsSpace), nil
 		}
 	}
 

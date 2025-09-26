@@ -34,7 +34,7 @@ func TestMainTestsFail(t *testing.T) {
 
 	main()
 
-	expectedMessage := "\tlan: from executing the tests\ntestfail: TestSum failed\n\n"
+	expectedMessage := "\tlan: from executing the tests\ntestfail: TestSum failed\n\tlan version: " + version
 	if r := defaultOS.stdout.(*bytes.Buffer).String(); r != expectedMessage {
 		t.Errorf("output = %q, want %q", r, expectedMessage)
 	}
@@ -106,7 +106,7 @@ func TestTestsTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expectedMessage := "\tlan: from executing the tests\ntimeout: panic: test timed out after 100ns\n\n"
+	expectedMessage := "\tlan: from executing the tests\ntimeout: panic: test timed out after 100ns"
 	if message != expectedMessage {
 		t.Errorf("message = %q, want %q", message, expectedMessage)
 	}
@@ -405,7 +405,7 @@ func TestMessage(t *testing.T) {
 			name:            "testsNoCoverage",
 			dir:             path.Join("testdata", "nocoverage"),
 			op:              newTests(30 * time.Second),
-			expectedMessage: "\tlan: from executing the tests\nnocoverage: test coverage is not 100.0%\n",
+			expectedMessage: "\tlan: from executing the tests\nnocoverage: test coverage is not 100.0%",
 		}, {
 			// the tests of the package are in the package pkg_test,
 			// this is, in another package.
@@ -418,7 +418,7 @@ func TestMessage(t *testing.T) {
 			name:            "WithoutTests",
 			dir:             path.Join("testdata", "notests"),
 			op:              newThereAreTests(),
-			expectedMessage: "\tlan: from checking if there are tests\nnotests has no tests\n",
+			expectedMessage: "\tlan: from checking if there are tests\nnotests has no tests",
 		}, {
 			// the package hasn't function declarations, so it not need tests.
 			name:            "noneedTests",
