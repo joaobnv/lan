@@ -34,7 +34,7 @@ func TestMainTestsFail(t *testing.T) {
 
 	main()
 
-	expectedMessage := "\tfrom executing the tests\ntestfail: TestSum failed\n\n"
+	expectedMessage := "\tlan: from executing the tests\ntestfail: TestSum failed\n\n"
 	if r := defaultOS.stdout.(*bytes.Buffer).String(); r != expectedMessage {
 		t.Errorf("output = %q, want %q", r, expectedMessage)
 	}
@@ -81,15 +81,14 @@ func TestCmdRunError(t *testing.T) {
 
 	cases := []struct{ op operation }{
 		{op: newVet()},
+		{op: newStaticcheck()},
 		{op: newTests(1 * time.Second)},
 		{op: newThereAreTests()},
 	}
 	for _, c := range cases {
 		t.Run(fmt.Sprintf("%T", c.op), func(t *testing.T) {
-			if _, pos, err := c.op.run(10); err == nil {
+			if _, err := c.op.run(); err == nil {
 				t.Errorf("run did not return a error")
-			} else if pos != 10 {
-				t.Errorf("position (%d) != pos (%d)", 10, pos)
 			}
 		})
 	}
@@ -102,14 +101,12 @@ func TestTestsTimeout(t *testing.T) {
 	cleanTestCache(t)
 
 	op := newTests(100 * time.Nanosecond)
-	message, pos, err := op.run(12)
+	message, err := op.run()
 	if err != nil {
 		t.Fatal(err)
-	} else if pos != 12 {
-		t.Errorf("position (%d) != pos (%d)", 12, pos)
 	}
 
-	expectedMessage := "\tfrom executing the tests\ntimeout: panic: test timed out after 100ns\n\n"
+	expectedMessage := "\tlan: from executing the tests\ntimeout: panic: test timed out after 100ns\n\n"
 	if message != expectedMessage {
 		t.Errorf("message = %q, want %q", message, expectedMessage)
 	}
@@ -122,10 +119,8 @@ func TestPackageLoadError(t *testing.T) {
 
 	op := newThereAreTests().(thereAreTests) // I think \x00 is not allowed in Linux and Windows.
 	op.packagesPath = "\x00<\\/>"
-	if _, pos, err := op.run(22); err == nil {
+	if _, err := op.run(); err == nil {
 		t.Errorf("err = nil, want an error explaining that the path is invalid")
-	} else if pos != 22 {
-		t.Errorf("position (%d) != pos (%d)", 22, pos)
 	}
 }
 
@@ -140,12 +135,10 @@ func TestCreateTempError(t *testing.T) {
 	}
 	op.os.remove = nil
 
-	if _, pos, err := op.run(1); err == nil {
+	if _, err := op.run(); err == nil {
 		t.Errorf("err = nil")
 	} else if err.Error() != errorMsg {
 		t.Errorf("err.Error() = %q, want %q", err.Error(), errorMsg)
-	} else if pos != 1 {
-		t.Errorf("position (%d) != pos (%d)", 1, pos)
 	}
 }
 
@@ -164,10 +157,8 @@ func TestCmdNoJson_tests(t *testing.T) {
 	t.Setenv("PATH", wd)
 
 	op := newTests(1 * time.Millisecond)
-	if _, pos, err := op.run(2); err == nil {
+	if _, err := op.run(); err == nil {
 		t.Error("err = nil")
-	} else if pos != 2 {
-		t.Errorf("position (%d) != pos (%d)", 2, pos)
 	}
 }
 
@@ -180,14 +171,12 @@ func TestCoverProfile_tests(t *testing.T) {
 		return os.Open(path.Join("..", "coverprofile.txt"))
 	}
 
-	msg, pos, err := op.run(3)
+	msg, err := op.run()
 	if err != nil {
 		t.Fatal(err)
-	} else if pos != 3 {
-		t.Errorf("position (%d) != pos (%d)", 3, pos)
 	}
 
-	expectedMessage := "\tfrom cover profile\n0"
+	expectedMessage := "\tlan: from cover profile\n0"
 	if msg != expectedMessage {
 		t.Errorf("message = %q, want %q", msg, expectedMessage)
 	}
@@ -203,13 +192,11 @@ func TestCoverProfileOpenError_tests(t *testing.T) {
 		return nil, errors.New(errMsg)
 	}
 
-	_, pos, err := op.run(4)
+	_, err := op.run()
 	if err == nil {
 		t.Error("err = nil")
 	} else if err.Error() != errMsg {
 		t.Errorf("err.Error() = %q, want %q", err.Error(), errMsg)
-	} else if pos != 4 {
-		t.Errorf("position (%d) != pos (%d)", 4, pos)
 	}
 }
 
@@ -231,13 +218,11 @@ func TestScannerError_tests(t *testing.T) {
 		})), nil
 	}
 
-	_, pos, err := op.run(5)
+	_, err := op.run()
 	if err == nil {
 		t.Error("err = nil")
 	} else if err.Error() != errMsg {
 		t.Errorf("err.Error() = %q, want %q", err.Error(), errMsg)
-	} else if pos != 5 {
-		t.Errorf("position (%d) != pos (%d)", 5, pos)
 	}
 }
 
@@ -319,6 +304,89 @@ func TestIsTestFunction(t *testing.T) {
 	}
 }
 
+// TestStaticcheckNotFoundInTheSystem tests the case where the staticcheck was not installed
+// in the system. For making this happens we change the PATH environment
+// variable to a directory that hasn't the staticcheck command.
+func TestStaticcheckNotFoundInTheSystem(t *testing.T) {
+	t.Chdir(path.Join("testdata", "testfail"))
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", wd)
+
+	op := newStaticcheck().(staticcheck)
+	if cmd, err := op.installedInTheSystem(); cmd != nil || err != nil {
+		t.Errorf("cmd = %v and err == %q, want cmd = <nil> and error = <nil>", cmd, err)
+	}
+}
+
+// TestStaticcheckLookPathError tests the case where the exec.LookPath("staticcheck") returns a error
+// that isn't exec.ErrNotFound. For making this happens we create a staticcheck command in the current
+// directory and change the PATH variable to not find the correct staticcheck command. With this exec.LookPath will
+// return exec.ErrDot.
+func TestStaticcheckLookPathError(t *testing.T) {
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// change the current dir to where the fake staticcheck will be.
+	t.Chdir(path.Join("testdata", "staticcheckcmd"))
+
+	// create a fake staticcheck command.
+	createExecutable(t, "staticcheck.go")
+
+	// note that we dont include testdata/staticcheckcmd in the PATH because if we do that then LookPath will not
+	// return ErrDot.
+	t.Setenv("PATH", path.Join(dir, "testdata"))
+
+	op := newStaticcheck().(staticcheck)
+	if _, err := op.installedInTheSystem(); !errors.Is(err, exec.ErrDot) {
+		t.Errorf("want err = exec.ErrDot, found %v", err)
+	}
+}
+
+// TestStaticcheckCommandError tests the case where s.command returns a error. For making this happens
+// we change PATH to point to a directory that not contains the commands go and staticcheck.
+func TestStaticcheckCommandError(t *testing.T) {
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(path.Join("testdata", "testfail"))
+	t.Setenv("PATH", path.Join(dir, "testdata", "testfail"))
+
+	op := newStaticcheck()
+	if _, err := op.run(); err == nil {
+		t.Error("want err != nil, found nil")
+	}
+}
+
+// TestStaticcheckWithoutTestsError tests the case where run returns a error due to
+// withTest or withoutTest returning a error.
+func TestStaticcheckError(t *testing.T) {
+	t.Chdir(path.Join("testdata", "testfail"))
+
+	op := newStaticcheck().(staticcheck)
+	prevNewCmd := op.os.newCmd
+	errorMsg := "failed to execute command"
+	op.os.newCmd = func(stdout, stderr io.Writer, name string, args ...string) command {
+		if args[0] == "tool" { // running "go tool"
+			return prevNewCmd(stdout, stderr, name, args...)
+		}
+		return cmd(func() error { return errors.New(errorMsg) })
+	}
+	if _, err := op.run(); err == nil {
+		t.Errorf("err == nil")
+	} else if err.Error() != errorMsg {
+		t.Errorf("want error.Error() == %s, got %s", errorMsg, err.Error())
+	}
+}
+
 func TestMessage(t *testing.T) {
 	cases := []struct {
 		name            string
@@ -337,7 +405,7 @@ func TestMessage(t *testing.T) {
 			name:            "testsNoCoverage",
 			dir:             path.Join("testdata", "nocoverage"),
 			op:              newTests(30 * time.Second),
-			expectedMessage: "\tfrom executing the tests\nnocoverage: test coverage is not 100.0%\n",
+			expectedMessage: "\tlan: from executing the tests\nnocoverage: test coverage is not 100.0%\n",
 		}, {
 			// the tests of the package are in the package pkg_test,
 			// this is, in another package.
@@ -350,7 +418,7 @@ func TestMessage(t *testing.T) {
 			name:            "WithoutTests",
 			dir:             path.Join("testdata", "notests"),
 			op:              newThereAreTests(),
-			expectedMessage: "\tfrom checking if there are tests\nnotests has no tests\n",
+			expectedMessage: "\tlan: from checking if there are tests\nnotests has no tests\n",
 		}, {
 			// the package hasn't function declarations, so it not need tests.
 			name:            "noneedTests",
@@ -363,19 +431,22 @@ func TestMessage(t *testing.T) {
 			dir:             path.Join("testdata", "testfuzz"),
 			op:              newThereAreTests(),
 			expectedMessage: "",
+		}, {
+			// staticcheck: no suspicious code.
+			name:            "tool/staticcheckok",
+			dir:             path.Join("testdata", "tool", "staticcheckok"),
+			op:              newStaticcheck(),
+			expectedMessage: "",
 		},
 	}
 
-	position := 22
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Chdir(c.dir)
 
-			message, pos, err := c.op.run(position)
+			message, err := c.op.run()
 			if err != nil {
 				t.Fatal(err)
-			} else if pos != position {
-				t.Errorf("position (%d) != pos (%d)", position, pos)
 			}
 
 			if message != c.expectedMessage {
@@ -404,19 +475,28 @@ func TestNotOkIgnoringExactMessageContent(t *testing.T) {
 			dir:               path.Join("testdata", "printfvet"),
 			op:                newVet(),
 			messageExplaining: "wrong arg type for %%d",
+		}, {
+			// the sum function is used only by tests.
+			name:              "staticcheck/used_only_by_tests",
+			dir:               path.Join("testdata", "tool", "staticcheckfuncusedonlybytests"),
+			op:                newStaticcheck(),
+			messageExplaining: "that sum is unused",
+		}, {
+			// the mult function is unused.
+			name:              "staticcheck/func_unused",
+			dir:               path.Join("testdata", "tool", "staticcheckunusedfunc"),
+			op:                newStaticcheck(),
+			messageExplaining: "that mult is unused",
 		},
 	}
 
-	position := 2
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Chdir(c.dir)
 
-			message, pos, err := c.op.run(position)
+			message, err := c.op.run()
 			if err != nil {
 				t.Fatal(err)
-			} else if pos != position {
-				t.Errorf("position (%d) != pos (%d)", position, pos)
 			}
 
 			if message == "" {

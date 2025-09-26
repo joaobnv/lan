@@ -6,6 +6,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -37,24 +38,26 @@ func main() {
 // run executes the operations.
 func run() (denyGit bool, message string) {
 	ops := []operation{
-		newVet(),
 		newTests(30 * time.Second),
+		newStaticcheck(),
+		newVet(),
 		newThereAreTests(),
 	}
 
 	// operationResult is the result of the method run of a operation.
 	type operationResult struct {
-		message  string
-		position int
-		err      error
+		message string
+		// the position is used for allow the results to always appear in the same order.
+		pos int
+		err error
 	}
 
-	chOperationResult := make(chan operationResult, len(ops))
+	chOperationResult := make(chan operationResult)
 	var wg sync.WaitGroup
 	for pos, op := range ops {
 		wg.Go(func() {
-			message, pos, err := op.run(pos)
-			chOperationResult <- operationResult{message: message, position: pos, err: err}
+			message, err := op.run()
+			chOperationResult <- operationResult{message: message, pos: pos, err: err}
 		})
 	}
 
@@ -66,8 +69,7 @@ func run() (denyGit bool, message string) {
 	results := make([]operationResult, len(ops))
 
 	for or := range chOperationResult {
-		// the position is used for allow the results to always appear in the same order.
-		results[or.position] = or
+		results[or.pos] = or
 	}
 
 	var mb strings.Builder
@@ -87,9 +89,8 @@ func run() (denyGit bool, message string) {
 // operation is a operation that can deny a git from proceding.
 type operation interface {
 	// run executes a operation and returns the message. If the result of the execution doesn't
-	// denies git then the empty string will be returned in message. pos will be equals position.
-	// We use pos to always display the messages in the same order.
-	run(position int) (message string, pos int, err error)
+	// denies git then the empty string will be returned in message.
+	run() (message string, err error)
 }
 
 // vet is a operation that executes "go vet ./...".
@@ -104,15 +105,14 @@ func newVet() operation {
 }
 
 // run executes "go vet ./...".
-func (v vet) run(position int) (message string, pos int, err error) {
-	pos = position
+func (v vet) run() (message string, err error) {
 	buf := new(bytes.Buffer)
-	buf.WriteString("\tfrom go vet\n")
+	buf.WriteString("\tlan: from go vet\n")
 
 	cmd := v.os.newCmd(nil, buf, "go", "vet", v.packagesPath)
 	err = cmd.Run()
 	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
-		return buf.String(), pos, nil
+		return buf.String(), nil
 	}
 
 	return
@@ -139,10 +139,9 @@ func newTests(timeoutForEachPackage time.Duration) operation {
 }
 
 // run executes the tests of the package and their subpackages.
-func (t tests) run(position int) (message string, pos int, err error) {
+func (t tests) run() (message string, err error) {
 	// even when the tests reports 100.0% of coverage some statements may not have been executed.
 	// Then we use the coverprofile to verifiy whether all statements where executed.
-	pos = position
 	cpf, err := t.os.createTemp("", "coverprofile*.out")
 	if err != nil {
 		return
@@ -221,7 +220,7 @@ func (t tests) message(rs []testResult, coverProfileName string) (string, error)
 	}
 
 	buf := new(bytes.Buffer)
-	buf.WriteString("\tfrom executing the tests\n")
+	buf.WriteString("\tlan: from executing the tests\n")
 
 	// if the tests failed then the coverage can be wrong because of the -failfast option
 	failed := slices.ContainsFunc(rs, func(r testResult) bool { return r.kind == testResultFail || r.kind == testResultTimeout })
@@ -246,7 +245,7 @@ func (t tests) message(rs []testResult, coverProfileName string) (string, error)
 // messageFromCoverProfile creates the message corresponding to the coverprofile generated.
 func (t tests) messageFromCoverProfile(fileName string) (m string, err error) {
 	buf := new(bytes.Buffer)
-	buf.WriteString("\tfrom cover profile\n")
+	buf.WriteString("\tlan: from cover profile\n")
 
 	f, err := t.os.open(fileName)
 	if err != nil {
@@ -308,10 +307,9 @@ func newThereAreTests() operation {
 }
 
 // run check if a packagem and your subpackages, need and has tests.
-func (t thereAreTests) run(position int) (message string, pos int, err error) {
-	pos = position
+func (t thereAreTests) run() (message string, err error) {
 	buf := new(bytes.Buffer)
-	buf.WriteString("\tfrom checking if there are tests\n")
+	buf.WriteString("\tlan: from checking if there are tests\n")
 
 	cfg := &packages.Config{
 		Mode:  packages.NeedName | packages.NeedSyntax | packages.NeedTypesInfo,
@@ -326,7 +324,7 @@ func (t thereAreTests) run(position int) (message string, pos int, err error) {
 	var dirs []string
 	for _, pkg := range pkgs {
 		if len(pkg.Errors) > 0 {
-			return "", pos, t.joinErrors(pkg.Errors...)
+			return "", t.joinErrors(pkg.Errors...)
 		}
 		pkgsByDir[pkg.Dir] = append(pkgsByDir[pkg.Dir], pkg)
 		if !slices.Contains(dirs, pkg.Dir) {
@@ -343,7 +341,7 @@ func (t thereAreTests) run(position int) (message string, pos int, err error) {
 	}
 
 	if denyGit {
-		return buf.String(), pos, nil
+		return buf.String(), nil
 	}
 
 	return
@@ -501,6 +499,150 @@ func (t thereAreTests) joinErrors(errs ...packages.Error) error {
 	}
 
 	return errors.New(strings.Join(messages, "\n"))
+}
+
+// staticcheck is a operation that executes the staticcheck linter, if it is installed.
+type staticcheck struct {
+	// packagesPath contains the path to be used for running the vet.
+	packagesPath string
+	os           operatingSystem
+}
+
+// newStaticcheck creates a staticcheck.
+func newStaticcheck() operation {
+	return staticcheck{packagesPath: "." + string(os.PathSeparator) + "...", os: defaultOS}
+}
+
+// run executes "staticcheck" and returns the message.
+// If the staticcheck is not installed then run returns the empty string.
+// It verifies if staticcheck was installed with "go get -tool" or with "go install".
+// If staticcheck was installed with "go get -tool" then run executes "go tool staticcheck".
+// Otherwise if installed with "go install" then run executes "staticcheck". If installed
+// with both methods then run executes executes "go tool staticcheck".
+func (s staticcheck) run() (message string, err error) {
+	buf := new(bytes.Buffer)
+	buf.WriteString("\tlan: from staticcheck\n")
+
+	cmd, err := s.command()
+	if err != nil {
+		return
+	}
+
+	type result struct {
+		message   string
+		err       error
+		withTests bool
+	}
+
+	chResult := make(chan result)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		var r result
+		r.withTests = true
+		r.message, r.err = s.withTests(cmd)
+		chResult <- r
+	})
+	wg.Go(func() {
+		var r result
+		r.message, r.err = s.withoutTests(cmd)
+		chResult <- r
+	})
+
+	go func() {
+		wg.Wait()
+		close(chResult)
+	}()
+
+	results := make([]result, 2)
+	for r := range chResult {
+		if r.withTests {
+			results[0] = r
+		} else {
+			results[1] = r
+		}
+	}
+
+	for i := range 2 {
+		if results[i].err != nil {
+			return "", results[i].err
+		} else if results[i].message != "" {
+			// withTests has precedence, so if there are a function not used by the test and the non-test code
+			// it wont be reported two times.
+			buf.WriteString(results[i].message)
+			return buf.String(), nil
+		}
+	}
+
+	return
+}
+
+// command determines what command to use, "go tool staticcheck" or "staticcheck".
+func (s staticcheck) command() (cmd []string, err error) {
+	cmd, err = s.installedWithGoTool()
+	if cmd != nil {
+		return
+	}
+
+	cmd, errSys := s.installedInTheSystem()
+	err = cmp.Or(err, errSys)
+	return
+}
+
+func (s staticcheck) installedWithGoTool() (cmd []string, err error) {
+	var stdout strings.Builder
+	goToolCmd := s.os.newCmd(&stdout, nil, "go", "tool")
+	if err = goToolCmd.Run(); err != nil {
+		return
+	}
+	for line := range strings.Lines(stdout.String()) {
+		if strings.TrimSpace(line) == "honnef.co/go/tools/cmd/staticcheck" {
+			return []string{"go", "tool", "staticcheck"}, nil
+		}
+	}
+
+	return
+}
+
+// maybe installed with "go install".
+func (s staticcheck) installedInTheSystem() (cmd []string, err error) {
+	if _, err = exec.LookPath("staticcheck"); errors.Is(err, exec.ErrNotFound) {
+		return nil, nil
+	} else if err != nil {
+		return
+	}
+
+	return []string{"staticcheck"}, nil
+}
+
+// withTests executes staticcheck considering the tests.
+func (s staticcheck) withTests(cmd []string) (message string, err error) {
+	var b strings.Builder
+	cmd = append(cmd, s.packagesPath)
+	execCmd := s.os.newCmd(&b, nil, cmd[0], cmd[1:]...)
+
+	err = execCmd.Run()
+	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
+		return b.String(), nil
+	}
+
+	return
+}
+
+// withoutTests executes "staticcheck -tests=false -checks=U1000 ./..." and returns the message.
+//
+// With the "-tests=false" parameter a function is not considered used if only tests call it.
+// I think that only the U1000 check is afected by "-tests=false".
+func (s staticcheck) withoutTests(cmd []string) (message string, err error) {
+	var b strings.Builder
+	cmd = append(cmd, "-tests=false", "-checks=U1000", s.packagesPath)
+	execCmd := s.os.newCmd(&b, nil, cmd[0], cmd[1:]...)
+
+	err = execCmd.Run()
+	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
+		return b.String(), nil
+	}
+
+	return
 }
 
 var defaultOS = operatingSystem{

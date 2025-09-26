@@ -1,3 +1,3 @@
 module testfuzz
 
-go 1.24rc1
+go 1.25.1

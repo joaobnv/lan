@@ -5,16 +5,19 @@ Lan runs the tests of the packages in the git repository.
 If any test fails then Lan denies the commit. The timeout for the tests is 30s for each package.
 Lan also verifies if the coverage of the tests is 100%. If not then Lan denies the commit.
 
+Lan runs [staticcheck](https://staticcheck.dev/) in each package, if it is installed. If it exits with a
+non-zero value then Lan denies the commit.
+
 Lan runs `go vet` in each package. If it exits with a non-zero value then Lan denies the commit.
 
 Lan checks if some package needs tests but doesn't have them. If this occurs then Lan denies the commit.
 
 # Install on Windows
-Run (Cmd) `set GOEXPERIMENT=jsonv2` and `go install github.com/joaobnv/lan`. Then copy the installed command and place it
+Run (Cmd) `set GOEXPERIMENT=jsonv2` and `go install github.com/joaobnv/lan@latest`. Then copy the installed command and place it
 in the *.git\hooks* folder of your repository. Then rename it to *pre-commit.exe*.
 
 # Install on Linux
-Run (Bash) `GOEXPERIMENT=jsonv2 go install github.com/joaobnv/lan`. Then copy the installed command and place it
+Run (Bash) `GOEXPERIMENT=jsonv2 go install github.com/joaobnv/lan@latest`. Then copy the installed command and place it
 in the *.git/hooks* folder of your repository. Then rename it to *pre-commit* and give it execution permission.
 
 # Caveats
