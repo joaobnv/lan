@@ -14,8 +14,10 @@ import (
 	"go/ast"
 	"go/types"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -45,9 +47,8 @@ func main() {
 func run() (denyGit bool, message string) {
 	ops := []operation{
 		newTests(30 * time.Second),
-		newStaticcheck(),
 		newVet(),
-		newThereAreTests(),
+		newStaticcheck(),
 	}
 
 	// operationResult is the result of the method run of a operation.
@@ -81,7 +82,7 @@ func run() (denyGit bool, message string) {
 	var messages []string
 	for _, res := range results {
 		if res.err != nil {
-			messages = append(messages, strings.TrimRightFunc(res.err.Error(), unicode.IsSpace))
+			return true, strings.TrimRightFunc(res.err.Error(), unicode.IsSpace)
 		} else if res.message != "" {
 			messages = append(messages, res.message)
 		}
@@ -117,6 +118,8 @@ func (v vet) run() (message string, err error) {
 	err = cmd.Run()
 	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
 		return strings.TrimRightFunc(buf.String(), unicode.IsSpace), nil
+	} else if err != nil {
+		return "", fmt.Errorf("\tlan: from go vet\n%w", err)
 	}
 
 	return
@@ -129,6 +132,7 @@ type tests struct {
 	packagesPath string
 	// coverageRe is for determining the coverage of the tests of a package.
 	coverageRe *regexp.Regexp
+	tat        thereAreTests
 	os         operatingSystem
 }
 
@@ -138,12 +142,21 @@ func newTests(timeoutForEachPackage time.Duration) operation {
 		timeoutForEachPackage: timeoutForEachPackage,
 		packagesPath:          "." + string(os.PathSeparator) + "...",
 		coverageRe:            regexp.MustCompile(`^coverage: (\d{1,3}(?:\.\d)?)% of statements\n$`),
+		tat:                   newThereAreTests(),
 		os:                    defaultOS,
 	}
 }
 
 // run executes the tests of the package and their subpackages.
 func (t tests) run() (message string, err error) {
+	tatResCh := make(chan []thereAreTestsResult, 1)
+	tatErrorCh := make(chan error, 1)
+	go func() {
+		res, err := t.tat.run()
+		tatResCh <- res
+		tatErrorCh <- err
+	}()
+
 	// even when the tests reports 100.0% of coverage some statements may not have been executed.
 	// Then we use the coverprofile to verifiy whether all statements where executed.
 	cpf, err := t.os.createTemp("", "coverprofile*.out")
@@ -162,119 +175,213 @@ func (t tests) run() (message string, err error) {
 
 	err = cmd.Run()
 	if exitError := new(exec.ExitError); err != nil && !errors.As(err, &exitError) {
-		return
+		return "", fmt.Errorf("\tlan: from executing the tests\n%w", err)
 	}
 
-	results, err := t.results(stdout)
+	resultsPerPkg, err := t.results(stdout)
 	if err != nil {
-		return
+		return "", fmt.Errorf("\tlan: from executing the tests\n%w", err)
 	}
 
-	message, err = t.message(results, cpf.Name())
-	return strings.TrimRightFunc(message, unicode.IsSpace), err
+	for _, rs := range resultsPerPkg {
+		if t.buildFailed(rs) {
+			// we return before testing a error from thereAreTests because we dont want
+			// the message from the packages.Load failure.
+			return "", fmt.Errorf("\tlan: from executing the tests\nbuild failed")
+		}
+	}
+
+	tatResults := <-tatResCh
+	tatErr := <-tatErrorCh
+
+	if tatErr != nil {
+		return "", tatErr
+	}
+
+	return t.message(tatResults, resultsPerPkg, cpf.Name())
 }
 
-// results decodes r as a []testResult, but only results whose kind is not testResultPass are returned.
-func (t tests) results(r io.Reader) ([]testResult, error) {
-	var rs []testResult
+// results decodes r as a map from the package name to their test results, but only results whose kind
+// is not testResultIgnore are returned.
+func (t tests) results(r io.Reader) (map[string][]testResult, error) {
+	m := make(map[string][]testResult)
+
 	dec := jsontext.NewDecoder(r)
 	for {
 		var te testEvent
 		if err := json.UnmarshalDecode(dec, &te); err == io.EOF {
-			return rs, nil
+			return m, nil
 		} else if err != nil {
 			return nil, err
 		}
 		result := t.result(te)
-		if result.kind == testResultPass {
-			continue
+		if result.kind != testResultIgnore {
+			m[result.pkg] = append(m[result.pkg], result)
+		} else if result.pkg != "" {
+			if _, ok := m[result.pkg]; !ok {
+				m[result.pkg] = nil
+			}
 		}
-		rs = append(rs, result)
 	}
 }
 
-// next decodes an event and returns their meaning
-func (t tests) result(te testEvent) (result testResult) {
+// next decodes an event and returns their meaning.
+func (t tests) result(te testEvent) testResult {
 	if te.Action == "fail" && te.Test != "" {
-		result = testResult{kind: testResultFail, message: fmt.Sprintf("%s: %s failed\n", te.Package, te.Test)}
-		return
+		return testResult{kind: testResultFail, pkg: te.Package, message: fmt.Sprintf("%s: %s failed\n", te.Package, te.Test)}
 	}
 
 	if te.Action == "output" && strings.HasPrefix(te.Output, "panic: test timed out after") {
-		result = testResult{kind: testResultTimeout, message: fmt.Sprintf("%s: %s\n", te.Package, te.Output)}
-		return
+		return testResult{kind: testResultTimeout, pkg: te.Package, message: fmt.Sprintf("%s: %s\n", te.Package, te.Output)}
 	}
 
 	if te.Action == "output" && t.coverageRe.MatchString(te.Output) {
 		submatches := t.coverageRe.FindAllStringSubmatch(te.Output, -1)
 		if submatches[0][1] == "100.0" {
-			return
+			return testResult{kind: testResultIgnore, pkg: te.Package}
 		}
-		result = testResult{kind: testResultCoverageNot100PerCent, message: fmt.Sprintf("%s: test coverage is not 100.0%%\n", te.Package)}
-		return
+		return testResult{kind: testResultCoverageNot100PerCent, pkg: te.Package,
+			message: fmt.Sprintf("%s: test coverage is not 100.0%%\n", te.Package)}
 	}
 
-	return
+	if te.Action == "build-fail" && te.Test == "" && te.Package == "" {
+		return testResult{kind: testResultBuildFail}
+	}
+
+	return testResult{kind: testResultIgnore, pkg: te.Package}
 }
 
-// message creates the message corresponding to the results of the execution of the tests and the coverprofile generated.
-func (t tests) message(rs []testResult, coverProfileName string) (string, error) {
-	if len(rs) == 0 { // all tests passed and 100.0% of coverage
-		return t.messageFromCoverProfile(coverProfileName)
+// message creates the message corresponding to the there are tests verification, the results of the execution of the tests,
+// and the coverprofile generated.
+func (t tests) message(tatResults []thereAreTestsResult, results map[string][]testResult, coverProfileName string) (string, error) {
+	var messages []testMessage
+
+	pkgNames := slices.Collect(maps.Keys(results))
+	slices.Sort(pkgNames)
+
+	for _, pkg := range pkgNames {
+		var tatRes thereAreTestsResult
+		ind := slices.IndexFunc(tatResults, func(e thereAreTestsResult) bool { return e.pkg == pkg })
+		if ind >= 0 {
+			tatRes = tatResults[ind]
+		}
+		if tatRes.pkg != "" && tatRes.need && !tatRes.has {
+			messages = append(messages, testMessage{kind: testMessageThereAreTests, message: fmt.Sprintf("%s has no tests\n", pkg)})
+			continue
+		}
+
+		rs := results[pkg]
+
+		if t.allTestsPassed(rs) && t.coverageIs100Percent(rs) {
+			ms, err := t.messageFromCoverProfile(pkg, coverProfileName)
+			if err != nil {
+				return "", err
+			}
+			messages = append(messages, ms...)
+			continue
+		}
+
+		messages = append(messages, t.messageFromExecutingTheTests(rs)...)
 	}
 
-	buf := new(bytes.Buffer)
-	buf.WriteString("\tlan: from executing the tests\n")
+	var exec, tat, covProf []testMessage
+	for _, m := range messages {
+		switch m.kind {
+		case testMessageExec, testMessageCover:
+			exec = append(exec, m)
+		case testMessageThereAreTests:
+			tat = append(tat, m)
+		case testMessageCoverProfile:
+			covProf = append(covProf, m)
+		}
+	}
 
+	var b strings.Builder
+	if len(exec) > 0 {
+		b.WriteString("\tlan: from executing the tests\n")
+		for _, m := range exec {
+			b.WriteString(m.message)
+		}
+	}
+	if len(tat) > 0 {
+		b.WriteString("\tlan: from checking if there are tests\n")
+		for _, m := range tat {
+			b.WriteString(m.message)
+		}
+	}
+	if len(covProf) > 0 {
+		b.WriteString("\tlan: from cover profile\n")
+		for _, m := range covProf {
+			b.WriteString(m.message)
+		}
+	}
+
+	return strings.TrimRightFunc(b.String(), unicode.IsSpace), nil
+}
+
+// messageFromExecutingTheTests creates the messages corresponding to the execution of the tests of a package.
+func (t tests) messageFromExecutingTheTests(pkgResults []testResult) (ms []testMessage) {
 	// if the tests failed then the coverage can be wrong because of the -failfast option
-	failed := slices.ContainsFunc(rs, func(r testResult) bool { return r.kind == testResultFail || r.kind == testResultTimeout })
+	failed := slices.ContainsFunc(pkgResults, testResult.isFailure)
 	if failed {
-		for i := range rs {
-			if rs[i].kind == testResultCoverageNot100PerCent {
+		for i := range pkgResults {
+			if pkgResults[i].kind == testResultCoverageNot100PerCent {
 				continue
 			}
-			buf.WriteString(rs[i].message)
+			ms = append(ms, testMessage{kind: testMessageExec, message: pkgResults[i].message})
 		}
 	} else {
-		for i := range rs {
-			if rs[i].kind == testResultCoverageNot100PerCent {
-				buf.WriteString(rs[i].message)
+		for i := range pkgResults {
+			if pkgResults[i].kind == testResultCoverageNot100PerCent {
+				ms = append(ms, testMessage{kind: testMessageCover, message: pkgResults[i].message})
 			}
 		}
 	}
-
-	return buf.String(), nil
+	return ms
 }
 
-// messageFromCoverProfile creates the message corresponding to the coverprofile generated.
-func (t tests) messageFromCoverProfile(fileName string) (m string, err error) {
-	buf := new(bytes.Buffer)
-	buf.WriteString("\tlan: from cover profile\n")
-
+// messageFromCoverProfile creates the messages corresponding to the coverprofile generated.
+func (t tests) messageFromCoverProfile(pkg string, fileName string) (ms []testMessage, err error) {
 	f, err := t.os.open(fileName)
 	if err != nil {
 		return
 	}
 	defer f.Close()
 
-	var hasStmtNotExecuted bool
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := sc.Text()
-		if strings.HasSuffix(line, "0") {
-			hasStmtNotExecuted = true
-			buf.WriteString(line)
+		linePkg := path.Dir(strings.Split(line, ":")[0])
+		if linePkg == pkg && strings.HasSuffix(line, "0") {
+			// when we run "go clean -testcache" and then "go test -coverprofile=somefile ." then the content
+			// of the cover profile may be repeated 3 times.
+			if !slices.ContainsFunc(ms, func(e testMessage) bool { return e.message == line+"\n" }) {
+				ms = append(ms, testMessage{kind: testMessageCoverProfile, message: line + "\n"})
+			}
 		}
 	}
 
-	if err = sc.Err(); err != nil {
-		return
-	}
-
-	if hasStmtNotExecuted {
-		return buf.String(), nil
-	}
+	err = sc.Err()
 	return
+}
+
+// buildFailed reports whether the results in rs implies that the build failed.
+func (t tests) buildFailed(rs []testResult) bool {
+	return slices.ContainsFunc(rs, func(e testResult) bool {
+		return e.kind == testResultBuildFail
+	})
+}
+
+// allTestsPassed reports whether rs dont contains test failures.
+func (t tests) allTestsPassed(rs []testResult) bool {
+	return !slices.ContainsFunc(rs, testResult.isFailure)
+}
+
+// coverageIs100Percent reports whether the results in rs implies that the coverage is 100%.
+func (t tests) coverageIs100Percent(rs []testResult) bool {
+	return !slices.ContainsFunc(rs, func(e testResult) bool {
+		return e.kind == testResultCoverageNot100PerCent
+	})
 }
 
 // testEvent is a event generated by the test command.
@@ -288,47 +395,63 @@ type testEvent struct {
 type testResultKind int
 
 const (
-	testResultPass testResultKind = iota
+	testResultIgnore testResultKind = iota
 	testResultFail
 	testResultTimeout
 	testResultCoverageNot100PerCent
+	testResultBuildFail
 )
 
 type testResult struct {
+	pkg     string
 	kind    testResultKind
 	message string
 }
 
-// thereAreTests is a operation that check if there are tests. But if the package dont
-// need tests then a message is not generated for it.
+// isFailure reports whether tr represents a test failure.
+func (tr testResult) isFailure() bool {
+	return tr.kind == testResultFail || tr.kind == testResultTimeout
+}
+
+type testMessageKind int
+
+const (
+	testMessageExec testMessageKind = iota
+	testMessageThereAreTests
+	testMessageCover
+	testMessageCoverProfile
+)
+
+type testMessage struct {
+	kind    testMessageKind
+	message string
+}
+
+// thereAreTests check if the packages need and have tests.
 type thereAreTests struct {
-	// packagesPath contains the path to be used for running the vet.
 	packagesPath string
 }
 
-func newThereAreTests() operation {
+func newThereAreTests() thereAreTests {
 	return thereAreTests{packagesPath: "." + string(os.PathSeparator) + "..."}
 }
 
-// run check if a packagem and your subpackages, need and has tests.
-func (t thereAreTests) run() (message string, err error) {
-	buf := new(bytes.Buffer)
-	buf.WriteString("\tlan: from checking if there are tests\n")
-
+// run check if a package and your subpackages, need and has tests.
+func (t thereAreTests) run() (results []thereAreTestsResult, err error) {
 	cfg := &packages.Config{
 		Mode:  packages.NeedName | packages.NeedSyntax | packages.NeedTypesInfo,
 		Tests: true,
 	}
 	pkgs, err := packages.Load(cfg, t.packagesPath)
 	if err != nil {
-		return
+		return results, fmt.Errorf("\tlan: from checking if there are tests\n%w", err)
 	}
 
 	pkgsByDir := make(map[string][]*packages.Package)
 	var dirs []string
 	for _, pkg := range pkgs {
 		if len(pkg.Errors) > 0 {
-			return "", t.joinErrors(pkg.Errors...)
+			return results, fmt.Errorf("\tlan: from checking if there are tests\n%w", t.joinErrors(pkg.Errors...))
 		}
 		pkgsByDir[pkg.Dir] = append(pkgsByDir[pkg.Dir], pkg)
 		if !slices.Contains(dirs, pkg.Dir) {
@@ -336,16 +459,12 @@ func (t thereAreTests) run() (message string, err error) {
 		}
 	}
 
-	var denyGit bool
 	for _, dir := range dirs {
-		if t.need(pkgsByDir[dir]) && !t.has(pkgsByDir[dir]) {
-			fmt.Fprintf(buf, "%s has no tests\n", t.pkgPath(pkgsByDir[dir]))
-			denyGit = true
-		}
-	}
-
-	if denyGit {
-		return strings.TrimRightFunc(buf.String(), unicode.IsSpace), nil
+		results = append(results, thereAreTestsResult{
+			pkg:  t.pkgPath(pkgsByDir[dir]),
+			need: t.need(pkgsByDir[dir]),
+			has:  t.has(pkgsByDir[dir]),
+		})
 	}
 
 	return
@@ -436,7 +555,8 @@ func (t thereAreTests) isTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
 		return false
 	}
 
-	paramNamed, ok := paramPointer.Elem().(*types.Named)
+	elem := types.Unalias(paramPointer.Elem())
+	paramNamed, ok := elem.(*types.Named)
 	if !ok {
 		return false
 	}
@@ -471,7 +591,8 @@ func (t thereAreTests) isFuzzTestFunction(ti *types.Info, f *ast.FuncDecl) bool 
 		return false
 	}
 
-	paramNamed, ok := paramPointer.Elem().(*types.Named)
+	elem := types.Unalias(paramPointer.Elem())
+	paramNamed, ok := elem.(*types.Named)
 	if !ok {
 		return false
 	}
@@ -505,6 +626,12 @@ func (t thereAreTests) joinErrors(errs ...packages.Error) error {
 	return errors.New(strings.Join(messages, "\n"))
 }
 
+type thereAreTestsResult struct {
+	pkg  string
+	need bool
+	has  bool
+}
+
 // staticcheck is a operation that executes the staticcheck linter, if it is installed.
 type staticcheck struct {
 	// packagesPath contains the path to be used for running the vet.
@@ -529,7 +656,7 @@ func (s staticcheck) run() (message string, err error) {
 
 	cmd, err := s.command()
 	if err != nil {
-		return
+		return "", fmt.Errorf("\tlan: from staticcheck\n%w", err)
 	}
 
 	type result struct {
@@ -568,10 +695,10 @@ func (s staticcheck) run() (message string, err error) {
 
 	for i := range 2 {
 		if results[i].err != nil {
-			return "", results[i].err
+			return "", fmt.Errorf("\tlan: from staticcheck\n%w", results[i].err)
 		} else if results[i].message != "" {
 			// withTests has precedence, so if there are a function not used by the test and the non-test code
-			// it wont be reported two times.
+			// then it wont be reported two times.
 			buf.WriteString(results[i].message)
 			return strings.TrimRightFunc(buf.String(), unicode.IsSpace), nil
 		}

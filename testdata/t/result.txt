@@ -1,0 +1,7 @@
+	lan: from executing the tests
+.*t: Test_Sub failed$
+	lan: from go vet (not all, unordered)
+.*:17:\d+: append with no values$
+.*:13:\d+: unreachable code$
+	lan: from staticcheck (not all)
+.*17:\d+: .* \(SA4021\)$

@@ -27,6 +27,5 @@ go.work.sum
 # vscode config
 .vscode
 
-# Cover profile of the tests.
-# Sometimes I want the coverage profile to verify more easily where is the uncovered statements.
-go-code-cover.txt
+# the message of the next commit.
+commit-msg.txt

@@ -1,6 +1,6 @@
 module github.com/joaobnv/lan
 
-go 1.25.1
+go 1.25.4
 
 require golang.org/x/tools v0.30.0
 

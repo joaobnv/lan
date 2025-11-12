@@ -28,5 +28,11 @@ then Lan will not work. But if the folder has packages `foo` and `foo_test` then
 Do you need to run Lan but don't have anything to commit? Do this: install Lan, with `go install`, but don't copy it to
 the hooks folder. Then go to the folder of your repository and invoke Lan with the `lan` command.
 
-Don't want to have to copy Lan to your hooks folder every time it's updated? Challenge: create a way so you only need
+Don't want to have to copy Lan to your hooks folder every time Lan is updated? Challenge: create a way so you only need
 to run the `go install` command and all your repositories will have the new version of Lan without you having to copy it.
+
+# Change Log
+
+### 0.1.0
+
+Now Lan runs the staticcheck.

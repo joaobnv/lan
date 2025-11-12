@@ -1,0 +1,7 @@
+	lan: from checking if there are tests
+ntf has no tests
+	lan: from go vet (not all)
+.* append with no values
+	lan: from staticcheck (unordered)
+.* \(SA1000\)$
+.* \(SA4021\)$

@@ -1,0 +1,5 @@
+	lan: from go vet (not all, unordered)
+.*:9:\d+: append with no values$
+.*:10:\d+: fmt.Printf format %s has arg v of wrong type \[\]int$
+	lan: from staticcheck (not all, unordered)
+.*:9:\d+: .* \(SA4021\)$

@@ -1,0 +1,2 @@
+	lan: from cover profile
+.*:4022\.\d+,4022\.\d+ \d+ 0$

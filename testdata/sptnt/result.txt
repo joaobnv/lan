@@ -1,0 +1,6 @@
+	lan: from checking if there are tests
+sptnt has no tests
+	lan: from go vet (not all)
+.* struct field bar has json tag but is not exported$
+	lan: from staticcheck
+.* \(ST1017\)$

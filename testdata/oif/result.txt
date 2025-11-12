@@ -1,0 +1,2 @@
+	lan: from checking if there are tests
+.*oif has no tests$

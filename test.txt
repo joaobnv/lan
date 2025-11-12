@@ -1,0 +1,114 @@
+executing tests:
+        (T-OK)     package tests pass with coverage 100% with all statements executed
+        (T-NTF)    package without test files
+        (T-TF-NT)  package with test files but without test
+        (T-SPT-NT) package with a separate package for tests but without tests
+        (T-T)      package with tests
+        (T-FUTO)   package with only fuzz tests
+        (T-PT)     package with tests but in it's own package
+        (T-T-PT)   package with tests in the same package and in a test package
+        (T-F)      package tests fail
+        (T-TO)     package tests timeout
+        (T-CF)     package tests pass with coverage < 100%
+        (T-SNE)    package tests pass with coverage 100% but has some statement(s) not executed
+        (T-OTF)    package with test files only
+        (T-Ps)     more than one package
+        (T-SE)     package with syntax error
+
+there are tests:
+        (TT-NN)          package no need tests
+        (TT-NTF)         package without test files
+        (TT-TF-NT)       package with test files but without tests
+        (TT-SPT-NT)      package with a separate package for tests but without tests
+        (TT-TTF-OT)      package with two files of test but only one has tests
+        (TT-OFT)         package with tests in one file
+        (TT-TFT)         package with tests in two files
+        (TT-FUTO)        package with only fuzz tests
+        (TT-TFUT)        package with tests and fuzz tests
+        (TT-PT)          package with tests but in it's own package
+        (TT-FUPT)        package with only fuzz tests but in it's own package
+        (TT-TFUPT)       package with tests and fuzz tests but in it's own package
+        (TT-TSP-FUOP)    package with tests in the package and fuzz tests in it's own package
+        (TT-FUSP-TOP)    package with fuzz tests in the package and tests in it's own package
+        (TT-TFUSP-TFUOP) package with tests and fuzz test in the same package and in a test package
+        (TT-OTF)         package with test files only
+        (TT-TWS)         test function with wrong signature
+        (TT-FWS)         fuzz function with wrong signature
+        (TT-OIF)         package with only init functions
+        (TT-SE)          package with syntax error
+        test function signature:
+                (TTFS-NP)        without 'Test' prefix
+                (TTFS-LC)        first rune after 'Test' lower case
+                (TTFS-U)         first rune after 'Test' is '_'
+                (TTFS-P*TA)      parameter with type '*T' where T (must be named T) is a alias for 'testing.T'
+                (TTFS-P*T-ID)    parameter with type '*T' where the import of the testing package is 'import . "testing"'
+                (TTFS-PT-ID)     parameter with type 'T' where the import of the testing package is 'import . "testing"'
+                (TTFS-PT-ITT)    parameter with type 'tt.T' where the import of the testing package is
+                                'import tt "testing"'
+                (TTFS-P*T-ITT)   parameter with type '*tt.T' where the import of the testing package is
+                                'import tt "testing"'
+                (TTFS-P*T-IO)    parameter with type '*testing.T' where the import of the testing package is
+                                'import "not/the/standard/testing"'
+                (TTFS-P*T-OP-TA) parameter with type '*testing.T' (must be named T) where 'testing' is another package but 'T'
+                                is a alias for the correct T
+        fuzz function signature:
+                (TTFFS-NP)        without 'Fuzz' prefix
+                (TTFFS-LC)        first rune after 'Fuzz' lower case
+                (TTFFS-U)         first rune after 'Fuzz' is '_'
+                (TTFFS-P*FA)      parameter with type '*F' where F (must be named F) is a alias for 'testing.F'
+                (TTFFS-P*F-ID)    parameter with type '*F' where the import of the testing package is
+                                'import . "testing"'
+                (TTFFS-PF-ID)     parameter with type 'F' where the import of the testing package is
+                                'import . "testing"'
+                (TTFFS-PF-ITT)    parameter with type 'tt.F' where the import of the testing package is
+                                'import tt "testing"'
+                (TTFFS-P*F-ITT)   parameter with type '*tt.F' where the import of the testing package is
+                                'import tt "testing"'
+                (TTFFS-P*F-IO)    parameter with type '*testing.F' where the import of the testing package is
+                                'import "not/the/standard/testing"'
+                (TTFFS-P*F-OP-FA) parameter with type '*testing.F' (must be named F) where 'testing' is another package but 'F' is
+                                a alias for the correct F
+
+executing vet:
+        (V-A)  the analyzer appends
+        (V-P)  the analyzer printf
+        (V-ST) the analyzer structtag
+        (V-U)  the analyzer unreachable
+        (V-As) more than one analyzer
+        (V-Ps) more than one package
+        (V-OK) without suspicious constructs
+
+executing staticcheck:
+        (S-SA1000)     the analyzer SA1000
+        (S-SA4021)     the analyzer SA4021
+        (S-ST1017)     the analyzer ST1017
+        (S-As)         more than one analyzer
+        (S-Ps)         more than one package
+        (S-OK)         without suspicious constructs
+        (S-IGN-SA1000) with "//lint:ignore SA1000 ..."
+
+
+
+tests:
+        ntf        T-NTF, TT-NTF, V-A, S-SA1000, S-SA4021,
+        tfntf      T-TF-NT, TT-TF-NT, TTFS-NP, TTFS-LC,
+                   TTFFS-NP, TTFFS-LC, V-P, V-A, S-SA4021
+        sptnt      T-SPT-NT, TT-SPT-NT, V-ST, S-ST1017
+        t          T-T, T-F, TT-TTF-OT, TT-TFUT, TTFS-U, TTFFS-U, V-U, S-SA1000,
+                   S-SA4021, S-As
+        futo       T-OK, T-FUTO, TT-FUTO, V-A, S-SA4021, V-P, V-As
+        pt         T-PT, TT-OFT, TT-PT, V-OK, S-IGN-SA1000
+        tpt        T-T-PT, T-CF, TT-TFT, TT-TFUSP-TFUOP, V-OK, S-OK
+        sne        T-SNE, TT-TSP-FUOP, V-OK, S-OK
+        ps         T-Ps, V-Ps, S-Ps
+           t       T-T, T-F, TT-FUPT, V-A, S-SA4021
+           f       T-T, T-F, TT-TFUPT, V-P, S-ST1017
+           exptf   TT-NN (export aliases for testing.T and testing.F)
+           opta    T-T, T-F, TT-OFT, TTFS-P*T-OP-TA, V-OK, S-OK
+           opfa    T-T, T-F, TT-OFT, TT-FUTO, TTFFS-P*F-OP-FA, V-OK, S-OK
+        tws        T-TF-NT, TT-TF-NT, TTFS-P*T-IO, TT-TWS, V-OK
+           testing TT-NN (export types T and F)
+        fws        T-TF-NT, TT-TF-NT, TTFFS-P*F-IO, TT-FWS, V-OK
+           testing TT-NN (export types T and F)
+        oif        T-NTF, TT-NTF, TT-OIF, V-OK, S-OK
+        fusptop    T-T, TT-FUSP-TOP
