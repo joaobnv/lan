@@ -1,23 +1,27 @@
 executing tests:
-        (T-OK)     package tests pass with coverage 100% with all statements executed
-        (T-NTF)    package without test files
-        (T-TF-NT)  package with test files but without test
-        (T-SPT-NT) package with a separate package for tests but without tests
-        (T-T)      package with tests
-        (T-FUTO)   package with only fuzz tests
-        (T-PT)     package with tests but in it's own package
-        (T-T-PT)   package with tests in the same package and in a test package
-        (T-F)      package tests fail
-        (T-TO)     package tests timeout
-        (T-CF)     package tests pass with coverage < 100%
-        (T-SNE)    package tests pass with coverage 100% but has some statement(s) not executed
-        (T-OTF)    package with test files only
-        (T-Ps)     more than one package
-        (T-SE)     package with syntax error
+        (T-OK)      package tests pass with coverage 100% with all statements executed
+        (T-NTF)     package without test files
+        (T-TF-NT)   package with test files but without test
+        (T-SPT-NT)  package with a separate package for tests but without tests
+        (T-T)       package with tests
+        (T-FUTO)    package with only fuzz tests
+        (T-PT)      package with tests but in it's own package
+        (T-T-PT)    package with tests in the same package and in a test package
+        (T-F)       package tests fail
+        (T-TO)      package tests timeout
+        (T-CF)      package tests pass with coverage < 100%
+        (T-SNE)     package tests pass with coverage 100% but has some statement(s) not executed
+        (T-OTF)     package with test files only
+        (T-Ps)      more than one package
+        (T-SE)      package with syntax error
 
 there are tests:
         (TT-NN)          package no need tests
         (TT-NTF)         package without test files
+        (T-NTF-UTF)      package without test files but with files with suffix 'test.go' but
+                           starting with a underscore
+        (T-NTF-DTF)      package without test files but with files with suffix 'test.go' but
+                           starting with a dot
         (TT-TF-NT)       package with test files but without tests
         (TT-SPT-NT)      package with a separate package for tests but without tests
         (TT-TTF-OT)      package with two files of test but only one has tests

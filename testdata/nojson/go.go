@@ -5,11 +5,12 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 )
 
 // stdout contains the standard output. We use it for allow tests to change the destination of the output.
-var stdout = os.Stdout
+var stdout io.ReadWriter = os.Stdout
 
 func main() {
 	fmt.Fprint(stdout, "<language>Go<language>")

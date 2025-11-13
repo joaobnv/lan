@@ -12,8 +12,10 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"golang.org/x/tools/go/packages"
@@ -35,9 +37,9 @@ func TestCmdRunError(t *testing.T) {
 	t.Setenv("PATH", wd)
 
 	cases := []struct{ op operation }{
-		{op: newVet()},
-		{op: newStaticcheck()},
-		{op: newTests(1 * time.Second)},
+		{op: newVet(wd)},
+		{op: newStaticcheck(wd)},
+		{op: newTests(1*time.Second, wd)},
 	}
 	for _, c := range cases {
 		t.Run(fmt.Sprintf("%T", c.op), func(t *testing.T) {
@@ -50,11 +52,16 @@ func TestCmdRunError(t *testing.T) {
 
 // tests the case where a timeout occurs in the tests.
 func TestTestsTimeout(t *testing.T) {
-	t.Chdir(path.Join("testdata", "to"))
+	t.Parallel()
 
-	cleanTestCache(t)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	op := newTests(100 * time.Nanosecond)
+	cleanTestCache(t, filepath.Join(wd, "testdata", "to"))
+
+	op := newTests(100*time.Nanosecond, filepath.Join(wd, "testdata", "to"))
 	message, err := op.run()
 	if err != nil {
 		t.Fatal(err)
@@ -69,9 +76,14 @@ func TestTestsTimeout(t *testing.T) {
 // tests the case where the path used by thereAreTests is invalid.
 // In this case we expect that packages.Load returns an error.
 func TestPackageLoadError(t *testing.T) {
-	t.Chdir(path.Join("testdata", "fusptop"))
+	t.Parallel()
 
-	op := newTests(30 * time.Second).(tests)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	op := newTests(30*time.Second, filepath.Join(wd, "testdata", "fusptop")).(tests)
 	// I think \x00 is not allowed in Linux and Windows.
 	op.tat.packagesPath = "\x00<\\/>"
 	if _, err := op.run(); err == nil {
@@ -81,9 +93,14 @@ func TestPackageLoadError(t *testing.T) {
 
 // tests the case where the createTemp method returns a error.
 func TestCreateTempError(t *testing.T) {
-	t.Chdir(path.Join("testdata", "t"))
+	t.Parallel()
 
-	op := newTests(1 * time.Second).(tests)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	op := newTests(1*time.Second, filepath.Join(wd, "testdata", "t")).(tests)
 	errorMsg := "CreateTemp: error"
 	op.os.createTemp = func(dir, pattern string) (*os.File, error) {
 		return nil, errors.New("CreateTemp: error")
@@ -130,7 +147,7 @@ func TestCmdNoJson_tests(t *testing.T) {
 		}
 	})
 
-	op := newTests(1 * time.Millisecond)
+	op := newTests(1*time.Millisecond, filepath.Join(wd, "testdata", "nojson"))
 	if _, err := op.run(); err == nil {
 		t.Error("err = nil")
 	}
@@ -138,42 +155,42 @@ func TestCmdNoJson_tests(t *testing.T) {
 
 // test the case where the opening of the coverprofile returns an error.
 func TestCoverProfileOpenError_tests(t *testing.T) {
-	t.Chdir(path.Join("testdata", "fusptop"))
+	t.Parallel()
 
-	op := newTests(1 * time.Millisecond).(tests)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	op := newTests(1*time.Millisecond, filepath.Join(wd, "testdata", "fusptop")).(tests)
 	errMsg := "Open: error"
 	op.os.open = func(name string) (io.ReadCloser, error) {
 		return nil, errors.New(errMsg)
 	}
 
-	_, err := op.run()
-	if err == nil {
+	if _, err = op.run(); err == nil {
 		t.Error("err = nil")
 	} else if err.Error() != errMsg {
 		t.Errorf("err.Error() = %q, want %q", err.Error(), errMsg)
 	}
 }
 
-type readerError func(p []byte) (n int, err error)
-
-func (r readerError) Read(p []byte) (n int, err error) {
-	return r(p)
-}
-
 // test the case where the reading of the cover profile returns an error.
 func TestScannerError_tests(t *testing.T) {
-	t.Chdir(path.Join("testdata", "fusptop"))
+	t.Parallel()
 
-	op := newTests(1 * time.Millisecond).(tests)
-	errMsg := "scanner: error"
-	op.os.open = func(name string) (io.ReadCloser, error) {
-		return io.NopCloser(readerError(func(p []byte) (n int, err error) {
-			return 0, errors.New(errMsg)
-		})), nil
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	_, err := op.run()
-	if err == nil {
+	op := newTests(1*time.Millisecond, filepath.Join(wd, "testdata", "fusptop")).(tests)
+	errMsg := "scanner: error"
+	op.os.open = func(name string) (io.ReadCloser, error) {
+		return io.NopCloser(iotest.ErrReader(errors.New(errMsg))), nil
+	}
+
+	if _, err := op.run(); err == nil {
 		t.Error("err = nil")
 	} else if err.Error() != errMsg {
 		t.Errorf("err.Error() = %q, want %q", err.Error(), errMsg)
@@ -183,7 +200,12 @@ func TestScannerError_tests(t *testing.T) {
 // test the case where the packages of dir are only of tests. To do this we run packages.Load
 // and removes the packages that are not of test from the result of Load.
 func TestPkgPath(t *testing.T) {
-	t.Chdir(path.Join("testdata", "fusptop"))
+	t.Parallel()
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	cfg := &packages.Config{
 		Context: t.Context(),
@@ -202,7 +224,7 @@ func TestPkgPath(t *testing.T) {
 		}
 	}
 
-	tat := newThereAreTests()
+	tat := newThereAreTests(filepath.Join(wd, "testdata", "fusptop"))
 	pp := tat.pkgPath(testOnly)
 	if pp != testOnly[0].PkgPath {
 		t.Errorf("pkg path = %q, want %q", pp, testOnly[0].PkgPath)
@@ -210,6 +232,8 @@ func TestPkgPath(t *testing.T) {
 }
 
 func TestIsTestFunction(t *testing.T) {
+	t.Parallel()
+
 	code := `
 		package code
 		import "testing"
@@ -244,7 +268,12 @@ func TestIsTestFunction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tat := newThereAreTests()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tat := newThereAreTests(wd)
 
 	for _, d := range f.Decls {
 		fd, ok := d.(*ast.FuncDecl)
@@ -262,8 +291,6 @@ func TestIsTestFunction(t *testing.T) {
 // in the system. For making this happens we change the PATH environment
 // variable to a directory that hasn't the staticcheck command.
 func TestStaticcheckNotFoundInTheSystem(t *testing.T) {
-	t.Chdir(path.Join("testdata", "fusptop"))
-
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -271,7 +298,7 @@ func TestStaticcheckNotFoundInTheSystem(t *testing.T) {
 
 	t.Setenv("PATH", wd)
 
-	op := newStaticcheck().(staticcheck)
+	op := newStaticcheck(filepath.Join(wd, "testdata", "fusptop")).(staticcheck)
 	if cmd, err := op.installedInTheSystem(); cmd != nil || err != nil {
 		t.Errorf("cmd = %v and err == %q, want cmd = <nil> and error = <nil>", cmd, err)
 	}
@@ -282,22 +309,22 @@ func TestStaticcheckNotFoundInTheSystem(t *testing.T) {
 // directory and change the PATH variable to not find the correct staticcheck command. With this exec.LookPath will
 // return exec.ErrDot.
 func TestStaticcheckLookPathError(t *testing.T) {
-	dir, err := os.Getwd()
+	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// change the current dir to where the fake staticcheck will be.
-	t.Chdir(path.Join("testdata", "staticcheckcmd"))
+	t.Chdir(filepath.Join(wd, "testdata", "staticcheckcmd"))
 
 	// create a fake staticcheck command.
 	createExecutable(t, "staticcheck.go")
 
 	// note that we dont include testdata/staticcheckcmd in the PATH because if we do that then LookPath will not
 	// return ErrDot.
-	t.Setenv("PATH", path.Join(dir, "testdata"))
+	t.Setenv("PATH", path.Join(wd, "testdata"))
 
-	op := newStaticcheck().(staticcheck)
+	op := newStaticcheck(filepath.Join(wd, "testdata", "staticcheckcmd")).(staticcheck)
 	if _, err := op.installedInTheSystem(); !errors.Is(err, exec.ErrDot) {
 		t.Errorf("want err = exec.ErrDot, found %v", err)
 	}
@@ -314,7 +341,7 @@ func TestStaticcheckCommandError(t *testing.T) {
 	t.Chdir(path.Join("testdata", "fusptop"))
 	t.Setenv("PATH", path.Join(dir, "testdata", "testfail"))
 
-	op := newStaticcheck()
+	op := newStaticcheck(filepath.Join(dir, "testdata", "fusptop"))
 	if _, err := op.run(); err == nil {
 		t.Error("want err != nil, found nil")
 	}
@@ -323,14 +350,19 @@ func TestStaticcheckCommandError(t *testing.T) {
 // TestStaticcheckWithoutTestsError tests the case where run returns a error due to
 // withTest or withoutTest returning a error.
 func TestStaticcheckError(t *testing.T) {
-	t.Chdir(path.Join("testdata", "fusptop"))
+	t.Parallel()
 
-	op := newStaticcheck().(staticcheck)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	op := newStaticcheck(filepath.Join(wd, "testdata", "fusptop")).(staticcheck)
 	prevNewCmd := op.os.newCmd
 	errorMsg := "failed to execute command"
-	op.os.newCmd = func(stdout, stderr io.Writer, name string, args ...string) command {
+	op.os.newCmd = func(workDir string, stdout, stderr io.Writer, name string, args ...string) command {
 		if args[0] == "tool" { // running "go tool"
-			return prevNewCmd(stdout, stderr, name, args...)
+			return prevNewCmd(workDir, stdout, stderr, name, args...)
 		}
 		return cmd(func() error { return errors.New(errorMsg) })
 	}
@@ -363,8 +395,10 @@ func createExecutable(t *testing.T, goFileName string) {
 }
 
 // cleanTestCache cleans the test cache of go.
-func cleanTestCache(t *testing.T) {
-	if err := exec.Command("go", "clean", "-testcache").Run(); err != nil {
+func cleanTestCache(t *testing.T, workDir string) {
+	cmd := exec.Command("go", "clean", "-testcache")
+	cmd.Dir = workDir
+	if err := cmd.Run(); err != nil {
 		t.Fatal(err)
 	}
 }

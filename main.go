@@ -33,7 +33,13 @@ import (
 const version = "0.1.0"
 
 func main() {
-	denyGit, message := run()
+	workDir, err := defaultOS.getwd()
+	if err != nil {
+		fmt.Println(defaultOS.stdout, err)
+		defaultOS.exit(1)
+		return
+	}
+	denyGit, message := run(workDir)
 	if denyGit {
 		fmt.Fprintln(defaultOS.stdout, message)
 		// I think that showing the version helps the user because Lan does not receive command line parameters
@@ -44,11 +50,11 @@ func main() {
 }
 
 // run executes the operations.
-func run() (denyGit bool, message string) {
+func run(workDir string) (denyGit bool, message string) {
 	ops := []operation{
-		newTests(30 * time.Second),
-		newVet(),
-		newStaticcheck(),
+		newTests(30*time.Second, workDir),
+		newVet(workDir),
+		newStaticcheck(workDir),
 	}
 
 	// operationResult is the result of the method run of a operation.
@@ -98,35 +104,9 @@ type operation interface {
 	run() (message string, err error)
 }
 
-// vet is a operation that executes "go vet ./...".
-type vet struct {
-	// packagesPath contains the path to be used for running the vet.
-	packagesPath string
-	os           operatingSystem
-}
-
-func newVet() operation {
-	return vet{packagesPath: "." + string(os.PathSeparator) + "...", os: defaultOS}
-}
-
-// run executes "go vet ./...".
-func (v vet) run() (message string, err error) {
-	buf := new(bytes.Buffer)
-	buf.WriteString("\tlan: from go vet\n")
-
-	cmd := v.os.newCmd(nil, buf, "go", "vet", v.packagesPath)
-	err = cmd.Run()
-	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
-		return strings.TrimRightFunc(buf.String(), unicode.IsSpace), nil
-	} else if err != nil {
-		return "", fmt.Errorf("\tlan: from go vet\n%w", err)
-	}
-
-	return
-}
-
 // tests is a operation that executes the tests.
 type tests struct {
+	workDir               string
 	timeoutForEachPackage time.Duration
 	// packagesPath contains the path to be used for running the tests.
 	packagesPath string
@@ -137,13 +117,14 @@ type tests struct {
 }
 
 // newTests creates a tests.
-func newTests(timeoutForEachPackage time.Duration) operation {
+func newTests(timeoutForEachPackage time.Duration, workDir string) operation {
 	return tests{
+		workDir:               workDir,
 		timeoutForEachPackage: timeoutForEachPackage,
 		packagesPath:          "." + string(os.PathSeparator) + "...",
 		coverageRe:            regexp.MustCompile(`^coverage: (\d{1,3}(?:\.\d)?)% of statements\n$`),
-		tat:                   newThereAreTests(),
-		os:                    defaultOS,
+		tat:                   newThereAreTests(workDir),
+		os:                    newOperatingSystem(),
 	}
 }
 
@@ -169,7 +150,7 @@ func (t tests) run() (message string, err error) {
 	to := t.timeoutForEachPackage.String()
 	stdout := new(bytes.Buffer)
 	cmd := t.os.newCmd(
-		stdout, nil,
+		t.workDir, stdout, nil,
 		"go", "test", "-json", "-timeout="+to, "-vet=off", "-cover", "-failfast", "-coverprofile="+cpf.Name(), t.packagesPath,
 	)
 
@@ -429,16 +410,18 @@ type testMessage struct {
 
 // thereAreTests check if the packages need and have tests.
 type thereAreTests struct {
+	workDir      string
 	packagesPath string
 }
 
-func newThereAreTests() thereAreTests {
-	return thereAreTests{packagesPath: "." + string(os.PathSeparator) + "..."}
+func newThereAreTests(workDir string) thereAreTests {
+	return thereAreTests{workDir: workDir, packagesPath: "." + string(os.PathSeparator) + "..."}
 }
 
 // run check if a package and your subpackages, need and has tests.
 func (t thereAreTests) run() (results []thereAreTestsResult, err error) {
 	cfg := &packages.Config{
+		Dir:   t.workDir,
 		Mode:  packages.NeedName | packages.NeedSyntax | packages.NeedTypesInfo,
 		Tests: true,
 	}
@@ -632,16 +615,45 @@ type thereAreTestsResult struct {
 	has  bool
 }
 
+// vet is a operation that executes "go vet ./...".
+type vet struct {
+	workDir string
+	// packagesPath contains the path to be used for running the vet.
+	packagesPath string
+	os           operatingSystem
+}
+
+func newVet(workDir string) operation {
+	return vet{workDir: workDir, packagesPath: "." + string(os.PathSeparator) + "...", os: newOperatingSystem()}
+}
+
+// run executes "go vet ./...".
+func (v vet) run() (message string, err error) {
+	buf := new(bytes.Buffer)
+	buf.WriteString("\tlan: from go vet\n")
+
+	cmd := v.os.newCmd(v.workDir, nil, buf, "go", "vet", v.packagesPath)
+	err = cmd.Run()
+	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
+		return strings.TrimRightFunc(buf.String(), unicode.IsSpace), nil
+	} else if err != nil {
+		return "", fmt.Errorf("\tlan: from go vet\n%w", err)
+	}
+
+	return
+}
+
 // staticcheck is a operation that executes the staticcheck linter, if it is installed.
 type staticcheck struct {
+	workDir string
 	// packagesPath contains the path to be used for running the vet.
 	packagesPath string
 	os           operatingSystem
 }
 
 // newStaticcheck creates a staticcheck.
-func newStaticcheck() operation {
-	return staticcheck{packagesPath: "." + string(os.PathSeparator) + "...", os: defaultOS}
+func newStaticcheck(workDir string) operation {
+	return staticcheck{workDir: workDir, packagesPath: "." + string(os.PathSeparator) + "...", os: newOperatingSystem()}
 }
 
 // run executes "staticcheck" and returns the message.
@@ -721,7 +733,7 @@ func (s staticcheck) command() (cmd []string, err error) {
 
 func (s staticcheck) installedWithGoTool() (cmd []string, err error) {
 	var stdout strings.Builder
-	goToolCmd := s.os.newCmd(&stdout, nil, "go", "tool")
+	goToolCmd := s.os.newCmd(s.workDir, &stdout, nil, "go", "tool")
 	if err = goToolCmd.Run(); err != nil {
 		return
 	}
@@ -749,7 +761,7 @@ func (s staticcheck) installedInTheSystem() (cmd []string, err error) {
 func (s staticcheck) withTests(cmd []string) (message string, err error) {
 	var b strings.Builder
 	cmd = append(cmd, s.packagesPath)
-	execCmd := s.os.newCmd(&b, nil, cmd[0], cmd[1:]...)
+	execCmd := s.os.newCmd(s.workDir, &b, nil, cmd[0], cmd[1:]...)
 
 	err = execCmd.Run()
 	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
@@ -766,7 +778,7 @@ func (s staticcheck) withTests(cmd []string) (message string, err error) {
 func (s staticcheck) withoutTests(cmd []string) (message string, err error) {
 	var b strings.Builder
 	cmd = append(cmd, "-tests=false", "-checks=U1000", s.packagesPath)
-	execCmd := s.os.newCmd(&b, nil, cmd[0], cmd[1:]...)
+	execCmd := s.os.newCmd(s.workDir, &b, nil, cmd[0], cmd[1:]...)
 
 	err = execCmd.Run()
 	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
@@ -776,21 +788,7 @@ func (s staticcheck) withoutTests(cmd []string) (message string, err error) {
 	return
 }
 
-var defaultOS = operatingSystem{
-	stdout:     os.Stdout,
-	exit:       os.Exit,
-	createTemp: os.CreateTemp,
-	remove:     os.Remove,
-	open: func(name string) (io.ReadCloser, error) {
-		return os.Open(name)
-	},
-	newCmd: func(stdout, stderr io.Writer, name string, args ...string) command {
-		cmd := exec.Command(name, args...)
-		cmd.Stdout = stdout
-		cmd.Stderr = stderr
-		return cmd
-	},
-}
+var defaultOS = newOperatingSystem()
 
 // opSystem is for allowing the tests to change the behavior of the packages os and exec.
 type operatingSystem struct {
@@ -805,7 +803,29 @@ type operatingSystem struct {
 	// open is for the os.Open function.
 	open func(name string) (io.ReadCloser, error)
 	// newCmd is for exec.CommandContext
-	newCmd func(stdout, stderr io.Writer, name string, args ...string) command
+	newCmd func(worDir string, stdout, stderr io.Writer, name string, args ...string) command
+	// getwd is for os.Getwd
+	getwd func() (string, error)
+}
+
+func newOperatingSystem() operatingSystem {
+	return operatingSystem{
+		stdout:     os.Stdout,
+		exit:       os.Exit,
+		createTemp: os.CreateTemp,
+		remove:     os.Remove,
+		open: func(name string) (io.ReadCloser, error) {
+			return os.Open(name)
+		},
+		newCmd: func(workDir string, stdout, stderr io.Writer, name string, args ...string) command {
+			cmd := exec.Command(name, args...)
+			cmd.Dir = workDir
+			cmd.Stdout = stdout
+			cmd.Stderr = stderr
+			return cmd
+		},
+		getwd: os.Getwd,
+	}
 }
 
 // command is for allowing the tests to change the behavior of the exec.Cmd struct.

@@ -1,10 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"os"
-	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -13,27 +12,24 @@ import (
 )
 
 func TestResults(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
 	cases := []string{
 		"ntf", "tfntf", "sptnt", "t", "futo", "pt", "tpt",
 		"sne", "ps", "tws", "fws", "oif", "fusptop",
 	}
 	for _, dir := range cases {
 		t.Run(dir, func(t *testing.T) {
-			t.Chdir(path.Join("testdata", dir))
-			var exitCode int
+			t.Parallel()
+			denyGit, message := run(filepath.Join(wd, "testdata", dir))
 
-			defaultOS.stdout = new(bytes.Buffer)
-			defaultOS.exit = func(code int) {
-				exitCode = code
-			}
-
-			main()
-
-			expected, err := os.ReadFile("result.txt")
+			expected, err := os.ReadFile(filepath.Join(wd, "testdata", dir, "result.txt"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			res := checkResults(exitCode, string(expected), defaultOS.stdout.(*bytes.Buffer).String())
+			res := checkResults(denyGit, string(expected), message)
 			if res != "" {
 				t.Error(res)
 			}
@@ -41,7 +37,7 @@ func TestResults(t *testing.T) {
 	}
 }
 
-func checkResults(exitCode int, expected, got string) string {
+func checkResults(denyGit bool, expected, got string) string {
 	expLines := slices.Collect(strings.Lines(expected))
 	gotLines := slices.Collect(strings.Lines(got))
 
@@ -92,22 +88,22 @@ func checkResults(exitCode int, expected, got string) string {
 
 	var message strings.Builder
 	if len(parts) == 0 && len(gotLines) == 0 {
-		if exitCode != 0 {
-			fmt.Fprintf(&message, "exit code = %d, want 0\n", exitCode)
+		if denyGit {
+			message.WriteString("denyGit = true, want false\n")
 		}
 	} else if len(parts) == 0 && len(gotLines) > 0 {
-		if exitCode != 1 {
-			fmt.Fprintf(&message, "exit code = %d, want 1\n", exitCode)
+		if denyGit {
+			message.WriteString("denyGit = true, want false\n")
 		}
 		fmt.Fprintf(&message, "unexpected: %s\n", strings.Join(gotLines, "\n"))
 	} else if len(parts) > 0 && len(gotLines) == 0 {
-		if exitCode != 0 {
-			fmt.Fprintf(&message, "exit code = %d, want 0\n", exitCode)
+		if !denyGit {
+			message.WriteString("denyGit = false, want true\n")
 		}
 		fmt.Fprint(&message, "lan didn't report anything\n")
 	} else {
-		if exitCode != 1 {
-			fmt.Fprintf(&message, "exit code = %d, want 1\n", exitCode)
+		if !denyGit {
+			message.WriteString("denyGit = false, want true\n")
 		}
 	}
 

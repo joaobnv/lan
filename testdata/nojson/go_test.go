@@ -9,7 +9,7 @@ import (
 )
 
 func Test1(t *testing.T) {
-	stdout := new(bytes.Buffer)
+	stdout = new(bytes.Buffer)
 
 	main()
 	dec := json.NewDecoder(stdout)
