@@ -10,4 +10,3 @@
   For example, for executing the _tests_ operation with a timeout of 500ms we can add a file named _tests.txt_
   in the folder. In this file we specify the timeout. The tests verify if the folder contains a file named
   _tests.txt_ and use it to execute the _tests_ operation.
-- use `go test -list='Test|Fuzz' -vet=off -json ./...` to test if there are tests.

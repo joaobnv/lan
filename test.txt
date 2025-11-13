@@ -14,6 +14,7 @@ executing tests:
         (T-OTF)     package with test files only
         (T-Ps)      more than one package
         (T-SE)      package with syntax error
+        (T-PMNTP)   package with more than one non-test package
 
 there are tests:
         (TT-NN)          package no need tests
@@ -116,3 +117,4 @@ tests:
            testing TT-NN (export types T and F)
         oif        T-NTF, TT-NTF, TT-OIF, V-OK, S-OK
         fusptop    T-T, TT-FUSP-TOP
+        se         T-SE, TT-SE

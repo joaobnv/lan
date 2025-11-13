@@ -3,11 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"go/ast"
-	"go/importer"
-	"go/parser"
-	"go/token"
-	"go/types"
 	"io"
 	"os"
 	"os/exec"
@@ -17,11 +12,35 @@ import (
 	"testing"
 	"testing/iotest"
 	"time"
-
-	"golang.org/x/tools/go/packages"
 )
 
 // Copyright (c) 2025, João Breno. See the license.
+
+func TestGetcwdError(t *testing.T) {
+	t.Cleanup(func() { defaultOS = newOperatingSystem() })
+	t.Chdir(filepath.Join("testdata", "fusptop"))
+
+	errMsg := "getwd error"
+	defaultOS.stdout = new(strings.Builder)
+	defaultOS.getwd = func() (string, error) {
+		return "", errors.New(errMsg)
+	}
+	var exitCode int
+	defaultOS.exit = func(code int) {
+		exitCode = code
+	}
+
+	main()
+
+	message := defaultOS.stdout.(*strings.Builder).String()
+	if message != errMsg {
+		t.Errorf("message = %q, want %q", message, errMsg)
+	}
+
+	if exitCode != 1 {
+		t.Errorf("exit code = %d, want 1", exitCode)
+	}
+}
 
 // tests the case where a call to cmd.Run() returns an error.
 // To make it return an error we change the PATH environment variable to a directory that don't have
@@ -147,7 +166,7 @@ func TestCmdNoJson_tests(t *testing.T) {
 		}
 	})
 
-	op := newTests(1*time.Millisecond, filepath.Join(wd, "testdata", "nojson"))
+	op := newTests(1*time.Millisecond, wd)
 	if _, err := op.run(); err == nil {
 		t.Error("err = nil")
 	}
@@ -194,96 +213,6 @@ func TestScannerError_tests(t *testing.T) {
 		t.Error("err = nil")
 	} else if err.Error() != errMsg {
 		t.Errorf("err.Error() = %q, want %q", err.Error(), errMsg)
-	}
-}
-
-// test the case where the packages of dir are only of tests. To do this we run packages.Load
-// and removes the packages that are not of test from the result of Load.
-func TestPkgPath(t *testing.T) {
-	t.Parallel()
-
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &packages.Config{
-		Context: t.Context(),
-		Mode:    packages.NeedName | packages.NeedSyntax | packages.NeedTypesInfo,
-		Tests:   true,
-	}
-	pkgs, err := packages.Load(cfg, "."+string(os.PathSeparator)+"...")
-	if err != nil {
-		return
-	}
-
-	var testOnly []*packages.Package
-	for i := range pkgs {
-		if strings.HasSuffix(pkgs[i].PkgPath, "_test") || strings.HasSuffix(pkgs[i].PkgPath, ".test") {
-			testOnly = append(testOnly, pkgs[i])
-		}
-	}
-
-	tat := newThereAreTests(filepath.Join(wd, "testdata", "fusptop"))
-	pp := tat.pkgPath(testOnly)
-	if pp != testOnly[0].PkgPath {
-		t.Errorf("pkg path = %q, want %q", pp, testOnly[0].PkgPath)
-	}
-}
-
-func TestIsTestFunction(t *testing.T) {
-	t.Parallel()
-
-	code := `
-		package code
-		import "testing"
-		type A int
-		func sum(a, b int) int {return a + b}
-		func Testsum(t *testing.T) {}
-		func TestSum(a, b int) {}
-		func TestSum2(a int) {}
-		func TestSum3(a *int) {}
-		func TestSum4(a *A) {}
-		func TestSum5(a *testing.B) {}
-		func FuzzSum(a, b int) {}
-		func FuzzSum2(a int) {}
-		func FuzzSum3(a *int) {}
-		func FuzzSum4(a *A) {}
-		func FuzzSum5(a *testing.B) {}
-		func Fuzzsum() {}
-	`
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "code.go", code, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	conf := types.Config{
-		Importer: importer.Default(),
-	}
-	info := &types.Info{
-		Defs: map[*ast.Ident]types.Object{},
-	}
-	if _, err = conf.Check("code", fset, []*ast.File{f}, info); err != nil {
-		t.Fatal(err)
-	}
-
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	tat := newThereAreTests(wd)
-
-	for _, d := range f.Decls {
-		fd, ok := d.(*ast.FuncDecl)
-		if !ok {
-			continue
-		}
-
-		if tat.isTestFunction(info, fd) {
-			t.Errorf("got %s is a test function, want that it is not", fd.Name.Name)
-		}
 	}
 }
 

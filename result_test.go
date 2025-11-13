@@ -11,6 +11,41 @@ import (
 	"unicode"
 )
 
+func TestResultMain(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []string{
+		"ntf", "fusptop",
+	}
+	for _, dir := range cases {
+		t.Run(dir, func(t *testing.T) {
+			t.Chdir(filepath.Join("testdata", dir))
+
+			defaultOS.stdout = new(strings.Builder)
+			var exitCode int
+			defaultOS.exit = func(code int) {
+				exitCode = code
+			}
+
+			main()
+
+			denyGit := exitCode != 0
+			message := defaultOS.stdout.(*strings.Builder).String()
+
+			expected, err := os.ReadFile(filepath.Join(wd, "testdata", dir, "result.txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			res := checkResults(denyGit, string(expected), message)
+			if res != "" {
+				t.Error(res)
+			}
+		})
+	}
+}
+
 func TestResults(t *testing.T) {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -18,7 +53,7 @@ func TestResults(t *testing.T) {
 	}
 	cases := []string{
 		"ntf", "tfntf", "sptnt", "t", "futo", "pt", "tpt",
-		"sne", "ps", "tws", "fws", "oif", "fusptop",
+		"sne", "ps", "tws", "fws", "oif", "fusptop", "se",
 	}
 	for _, dir := range cases {
 		t.Run(dir, func(t *testing.T) {

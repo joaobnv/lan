@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
-	"go/types"
 	"io"
 	"maps"
 	"os"
@@ -24,8 +23,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/tools/go/packages"
 )
 
@@ -35,16 +34,16 @@ const version = "0.1.0"
 func main() {
 	workDir, err := defaultOS.getwd()
 	if err != nil {
-		fmt.Println(defaultOS.stdout, err)
+		fmt.Fprint(defaultOS.stdout, err)
 		defaultOS.exit(1)
 		return
 	}
 	denyGit, message := run(workDir)
 	if denyGit {
-		fmt.Fprintln(defaultOS.stdout, message)
+		fmt.Fprint(defaultOS.stdout, message)
 		// I think that showing the version helps the user because Lan does not receive command line parameters
 		// that make it show its version.
-		fmt.Fprint(defaultOS.stdout, "\tlan version: "+version)
+		fmt.Fprint(defaultOS.stdout, "\n\tlan version: "+version)
 		defaultOS.exit(1)
 	}
 }
@@ -206,7 +205,7 @@ func (t tests) results(r io.Reader) (map[string][]testResult, error) {
 	}
 }
 
-// next decodes an event and returns their meaning.
+// result decodes an event and returns their meaning.
 func (t tests) result(te testEvent) testResult {
 	if te.Action == "fail" && te.Test != "" {
 		return testResult{kind: testResultFail, pkg: te.Package, message: fmt.Sprintf("%s: %s failed\n", te.Package, te.Test)}
@@ -303,7 +302,7 @@ func (t tests) message(tatResults []thereAreTestsResult, results map[string][]te
 // messageFromExecutingTheTests creates the messages corresponding to the execution of the tests of a package.
 func (t tests) messageFromExecutingTheTests(pkgResults []testResult) (ms []testMessage) {
 	// if the tests failed then the coverage can be wrong because of the -failfast option
-	failed := slices.ContainsFunc(pkgResults, testResult.isFailure)
+	failed := slices.ContainsFunc(pkgResults, testResult.isTestFailure)
 	if failed {
 		for i := range pkgResults {
 			if pkgResults[i].kind == testResultCoverageNot100PerCent {
@@ -355,7 +354,7 @@ func (t tests) buildFailed(rs []testResult) bool {
 
 // allTestsPassed reports whether rs dont contains test failures.
 func (t tests) allTestsPassed(rs []testResult) bool {
-	return !slices.ContainsFunc(rs, testResult.isFailure)
+	return !slices.ContainsFunc(rs, testResult.isTestFailure)
 }
 
 // coverageIs100Percent reports whether the results in rs implies that the coverage is 100%.
@@ -390,7 +389,7 @@ type testResult struct {
 }
 
 // isFailure reports whether tr represents a test failure.
-func (tr testResult) isFailure() bool {
+func (tr testResult) isTestFailure() bool {
 	return tr.kind == testResultFail || tr.kind == testResultTimeout
 }
 
@@ -412,189 +411,133 @@ type testMessage struct {
 type thereAreTests struct {
 	workDir      string
 	packagesPath string
+	os           operatingSystem
 }
 
 func newThereAreTests(workDir string) thereAreTests {
-	return thereAreTests{workDir: workDir, packagesPath: "." + string(os.PathSeparator) + "..."}
+	return thereAreTests{workDir: workDir, packagesPath: "." + string(os.PathSeparator) + "...", os: newOperatingSystem()}
 }
 
-// run check if a package and your subpackages, need and has tests.
+// run computes whether the packages need and has tests.
 func (t thereAreTests) run() (results []thereAreTestsResult, err error) {
-	cfg := &packages.Config{
-		Dir:   t.workDir,
-		Mode:  packages.NeedName | packages.NeedSyntax | packages.NeedTypesInfo,
-		Tests: true,
-	}
-	pkgs, err := packages.Load(cfg, t.packagesPath)
-	if err != nil {
-		return results, fmt.Errorf("\tlan: from checking if there are tests\n%w", err)
+	needCh := make(chan map[string]bool, 1)
+	hasCh := make(chan map[string]bool, 1)
+	g := new(errgroup.Group)
+
+	g.Go(func() error {
+		needMap, err := t.need()
+		needCh <- needMap
+		return err
+	})
+
+	g.Go(func() error {
+		hasMap, err := t.has()
+		hasCh <- hasMap
+		return err
+	})
+
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
-	pkgsByDir := make(map[string][]*packages.Package)
-	var dirs []string
-	for _, pkg := range pkgs {
-		if len(pkg.Errors) > 0 {
-			return results, fmt.Errorf("\tlan: from checking if there are tests\n%w", t.joinErrors(pkg.Errors...))
-		}
-		pkgsByDir[pkg.Dir] = append(pkgsByDir[pkg.Dir], pkg)
-		if !slices.Contains(dirs, pkg.Dir) {
-			dirs = append(dirs, pkg.Dir)
-		}
-	}
+	needMap := <-needCh
+	hasMap := <-hasCh
 
-	for _, dir := range dirs {
+	for pkg, has := range hasMap {
 		results = append(results, thereAreTestsResult{
-			pkg:  t.pkgPath(pkgsByDir[dir]),
-			need: t.need(pkgsByDir[dir]),
-			has:  t.has(pkgsByDir[dir]),
+			pkg:  pkg,
+			need: needMap[pkg],
+			has:  has,
 		})
 	}
 
 	return
 }
 
-// need reports wheter pkg need tests. A directory may have more than one package because of the tests (see the documentation
-// of packages.Config.Tests).
-func (t thereAreTests) need(pkgsOfDir []*packages.Package) bool {
+// need reports whether the packages need tests.
+func (t thereAreTests) need() (map[string]bool, error) {
 	// We dont support folders with multiple non-test packages.
-	for _, pkg := range pkgsOfDir {
-		if strings.HasSuffix(pkg.PkgPath, ".test") {
-			continue
+
+	result := make(map[string]bool)
+
+	cfg := &packages.Config{
+		Dir:  t.workDir,
+		Mode: packages.NeedSyntax | packages.NeedFiles | packages.NeedName,
+	}
+	pkgs, err := packages.Load(cfg, t.packagesPath)
+	if err != nil {
+		return nil, err
+	}
+
+	funcDecl := func(e ast.Decl) bool { _, ok := e.(*ast.FuncDecl); return ok }
+	for _, pkg := range pkgs {
+		if len(pkg.Errors) > 0 {
+			return nil, t.joinErrors(pkg.Errors...)
 		}
+		result[pkg.PkgPath] = false
 		for _, s := range pkg.Syntax {
-			f := pkg.Fset.File(s.FileStart)
-			if strings.HasSuffix(f.Name(), "_test.go") {
-				continue
-			}
-
-			for _, d := range s.Decls {
-				if _, ok := d.(*ast.FuncDecl); ok {
-					return true
-				}
+			if slices.ContainsFunc(s.Decls, funcDecl) {
+				result[pkg.PkgPath] = true
+				break
 			}
 		}
 	}
 
-	return false
+	return result, nil
 }
 
-// has reports wheter the directory has tests.
-func (t thereAreTests) has(pkgsOfDir []*packages.Package) bool {
-	for _, pkg := range pkgsOfDir {
-		for _, s := range pkg.Syntax {
-			f := pkg.Fset.File(s.FileStart)
-			if !strings.HasSuffix(f.Name(), "_test.go") {
-				continue
-			}
+// has reports wheter the packages have tests.
+func (t thereAreTests) has() (map[string]bool, error) {
+	stdout := new(bytes.Buffer)
+	cmd := t.os.newCmd(
+		t.workDir, stdout, nil,
+		"go", "test", "-json", "-vet=off", "-list=(^Test)|(^Fuzz)", t.packagesPath,
+	)
 
-			for _, d := range s.Decls {
-				f, ok := d.(*ast.FuncDecl)
-				if !ok {
-					continue
-				}
-				if t.isTestFunction(pkg.TypesInfo, f) {
-					return true
-				}
+	err := cmd.Run()
+	if exitError := new(exec.ExitError); err != nil && !errors.As(err, &exitError) {
+		return nil, err
+	}
+
+	return t.decode(stdout)
+}
+
+// decode decodes r as a map from the package name to whether the package has or not has tests.
+func (t thereAreTests) decode(r io.Reader) (map[string]bool, error) {
+	m := make(map[string]bool)
+
+	dec := jsontext.NewDecoder(r)
+	for {
+		var te testEvent
+		if err := json.UnmarshalDecode(dec, &te); err == io.EOF {
+			return m, nil
+		} else if err != nil {
+			return nil, err
+		}
+
+		if t.isTest(te) {
+			m[te.Package] = true
+		} else if t.isBuildFailure(te) {
+			return nil, errors.New("build fail")
+		} else if te.Package != "" {
+			if _, ok := m[te.Package]; !ok {
+				m[te.Package] = false
 			}
 		}
 	}
-
-	return false
 }
 
-// pkgPath return the path of the non test package in the directory. If there aren't such a package then it returns
-// the path of the first package in pkgsByDir.
-func (t thereAreTests) pkgPath(pkgsByDir []*packages.Package) string {
-	for _, pkg := range pkgsByDir {
-		if !strings.HasSuffix(pkg.PkgPath, ".test") && !strings.HasSuffix(pkg.PkgPath, "_test") {
-			return pkg.PkgPath
-		}
+// isTest reports whether the event represents a test listing.
+func (t thereAreTests) isTest(te testEvent) bool {
+	if te.Action != "output" || te.Package == "" {
+		return false
 	}
-
-	return pkgsByDir[0].PkgPath
+	return strings.HasPrefix(te.Output, "Test") || strings.HasPrefix(te.Output, "Fuzz")
 }
 
-// isTestFunction reports wheter f has the signature of a test function.
-func (t thereAreTests) isTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
-	if t.isFuzzTestFunction(ti, f) {
-		return true
-	}
-
-	if !strings.HasPrefix(f.Name.Name, "Test") {
-		return false
-	}
-
-	if t.startWithLowerCaseLetter(strings.TrimPrefix(f.Name.Name, "Test")) {
-		return false
-	}
-
-	sig := ti.Defs[f.Name].Type().(*types.Signature)
-	if sig.Params().Len() != 1 {
-		return false
-	}
-
-	paramPointer, ok := sig.Params().At(0).Type().(*types.Pointer)
-	if !ok {
-		return false
-	}
-
-	elem := types.Unalias(paramPointer.Elem())
-	paramNamed, ok := elem.(*types.Named)
-	if !ok {
-		return false
-	}
-
-	if pkg := paramNamed.Obj().Pkg(); pkg == nil || pkg.Path() != "testing" {
-		return false
-	}
-
-	if paramNamed.Obj().Name() != "T" {
-		return false
-	}
-
-	return true
-}
-
-// isFuzzTestFunction reports wheter f has the signature of a fuzz test function.
-func (t thereAreTests) isFuzzTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
-	if !strings.HasPrefix(f.Name.Name, "Fuzz") {
-		return false
-	}
-	if t.startWithLowerCaseLetter(strings.TrimPrefix(f.Name.Name, "Fuzz")) {
-		return false
-	}
-
-	sig := ti.Defs[f.Name].Type().(*types.Signature)
-	if sig.Params().Len() != 1 {
-		return false
-	}
-
-	paramPointer, ok := sig.Params().At(0).Type().(*types.Pointer)
-	if !ok {
-		return false
-	}
-
-	elem := types.Unalias(paramPointer.Elem())
-	paramNamed, ok := elem.(*types.Named)
-	if !ok {
-		return false
-	}
-
-	if pkg := paramNamed.Obj().Pkg(); pkg == nil || pkg.Path() != "testing" {
-		return false
-	}
-
-	if paramNamed.Obj().Name() != "F" {
-		return false
-	}
-
-	return true
-}
-
-// startWithLowerCaseLetter reports if s start with a lower case letter.
-func (t thereAreTests) startWithLowerCaseLetter(s string) bool {
-	r, _ := utf8.DecodeRuneInString(s)
-	return unicode.IsLower(r)
+// isBuildFailure reports whether the event represents a build failure.
+func (t thereAreTests) isBuildFailure(te testEvent) bool {
+	return te.Action == "build-fail" && te.Test == "" && te.Package == ""
 }
 
 // joinErrors concatenates the error messages of the errors in errs, with a new line between
