@@ -2,7 +2,7 @@
 Git hook for executing tests on commit of go packages.
 
 Lan runs the tests of the packages in the git repository.
-If any test fails then Lan denies the commit. The timeout for the tests is 30s for each package.
+If any test fails then Lan denies the commit. The timeout for the tests is 120s for each package.
 Lan also verifies if the coverage of the tests is 100%. If not then Lan denies the commit.
 
 Lan runs [staticcheck](https://staticcheck.dev/) in each package, if it is installed. If it exits with a

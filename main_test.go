@@ -69,29 +69,6 @@ func TestCmdRunError(t *testing.T) {
 	}
 }
 
-// tests the case where a timeout occurs in the tests.
-func TestTestsTimeout(t *testing.T) {
-	t.Parallel()
-
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cleanTestCache(t, filepath.Join(wd, "testdata", "to"))
-
-	op := newTests(100*time.Nanosecond, filepath.Join(wd, "testdata", "to"))
-	message, err := op.run()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expectedMessage := "\tlan: from executing the tests\nto: panic: test timed out after 100ns"
-	if message != expectedMessage {
-		t.Errorf("message = %q, want %q", message, expectedMessage)
-	}
-}
-
 // tests the case where the path used by thereAreTests is invalid.
 // In this case we expect that packages.Load returns an error.
 func TestPackageLoadError(t *testing.T) {
@@ -251,7 +228,7 @@ func TestStaticcheckLookPathError(t *testing.T) {
 
 	// note that we dont include testdata/staticcheckcmd in the PATH because if we do that then LookPath will not
 	// return ErrDot.
-	t.Setenv("PATH", path.Join(wd, "testdata"))
+	t.Setenv("PATH", "."+string(os.PathListSeparator)+path.Join(wd, "testdata"))
 
 	op := newStaticcheck(filepath.Join(wd, "testdata", "staticcheckcmd")).(staticcheck)
 	if _, err := op.installedInTheSystem(); !errors.Is(err, exec.ErrDot) {
@@ -321,13 +298,4 @@ func createExecutable(t *testing.T, goFileName string) {
 			panic(err)
 		}
 	})
-}
-
-// cleanTestCache cleans the test cache of go.
-func cleanTestCache(t *testing.T, workDir string) {
-	cmd := exec.Command("go", "clean", "-testcache")
-	cmd.Dir = workDir
-	if err := cmd.Run(); err != nil {
-		t.Fatal(err)
-	}
 }

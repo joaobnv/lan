@@ -19,9 +19,7 @@ executing tests:
 there are tests:
         (TT-NN)          package no need tests
         (TT-NTF)         package without test files
-        (T-NTF-UTF)      package without test files but with files with suffix 'test.go' but
-                           starting with a underscore
-        (T-NTF-DTF)      package without test files but with files with suffix 'test.go' but
+        (TT-NTF-DTF)     package without test files but with files with suffix 'test.go' but
                            starting with a dot
         (TT-TF-NT)       package with test files but without tests
         (TT-SPT-NT)      package with a separate package for tests but without tests
@@ -47,9 +45,6 @@ there are tests:
                 (TTFS-U)         first rune after 'Test' is '_'
                 (TTFS-P*TA)      parameter with type '*T' where T (must be named T) is a alias for 'testing.T'
                 (TTFS-P*T-ID)    parameter with type '*T' where the import of the testing package is 'import . "testing"'
-                (TTFS-PT-ID)     parameter with type 'T' where the import of the testing package is 'import . "testing"'
-                (TTFS-PT-ITT)    parameter with type 'tt.T' where the import of the testing package is
-                                'import tt "testing"'
                 (TTFS-P*T-ITT)   parameter with type '*tt.T' where the import of the testing package is
                                 'import tt "testing"'
                 (TTFS-P*T-IO)    parameter with type '*testing.T' where the import of the testing package is
@@ -63,10 +58,6 @@ there are tests:
                 (TTFFS-P*FA)      parameter with type '*F' where F (must be named F) is a alias for 'testing.F'
                 (TTFFS-P*F-ID)    parameter with type '*F' where the import of the testing package is
                                 'import . "testing"'
-                (TTFFS-PF-ID)     parameter with type 'F' where the import of the testing package is
-                                'import . "testing"'
-                (TTFFS-PF-ITT)    parameter with type 'tt.F' where the import of the testing package is
-                                'import tt "testing"'
                 (TTFFS-P*F-ITT)   parameter with type '*tt.F' where the import of the testing package is
                                 'import tt "testing"'
                 (TTFFS-P*F-IO)    parameter with type '*testing.F' where the import of the testing package is
@@ -106,11 +97,19 @@ tests:
         tpt        T-T-PT, T-CF, TT-TFT, TT-TFUSP-TFUOP, V-OK, S-OK
         sne        T-SNE, TT-TSP-FUOP, V-OK, S-OK
         ps         T-Ps, V-Ps, S-Ps
-           t       T-T, T-F, TT-FUPT, V-A, S-SA4021
+           t       T-T, TT-FUPT, V-A, S-SA4021
            f       T-T, T-F, TT-TFUPT, V-P, S-ST1017
            exptf   TT-NN (export aliases for testing.T and testing.F)
-           opta    T-T, T-F, TT-OFT, TTFS-P*T-OP-TA, V-OK, S-OK
-           opfa    T-T, T-F, TT-OFT, TT-FUTO, TTFFS-P*F-OP-FA, V-OK, S-OK
+           opta    T-T, T-OK, TT-OFT, TTFS-P*T-OP-TA, V-OK, S-OK
+           opfa    T-T, T-OK, TT-OFT, TT-FUTO, TTFFS-P*F-OP-FA, V-OK, S-OK
+           pstitt  T-T, T-OK, TTFS-P*T-ITT, V-OK, S-OK
+           psfitt  T-T, T-OK, TTFFS-P*F-ITT, V-OK, S-OK
+           psta    T-T, T-OK, TTFS-P*TA, V-OK, S-OK
+           pstid   T-T, T-OK, TTFS-P*T-ID, V-OK, S-OK
+           otf     T-T, T-OTF, TT-OTF, V-OK, S-OK
+           psfid   T-T, T-OK, TTFFS-P*F-ID, V-OK, S-OK
+           psfa    T-T, T-OK, TTFFS-P*FA, V-OK, S-OK
+           dtf     T-NTF, TT-NTF, TT-NTF-DTF, V-OK, S-OK
         tws        T-TF-NT, TT-TF-NT, TTFS-P*T-IO, TT-TWS, V-OK
            testing TT-NN (export types T and F)
         fws        T-TF-NT, TT-TF-NT, TTFFS-P*F-IO, TT-FWS, V-OK
@@ -118,3 +117,5 @@ tests:
         oif        T-NTF, TT-NTF, TT-OIF, V-OK, S-OK
         fusptop    T-T, TT-FUSP-TOP
         se         T-SE, TT-SE
+        to         T-TO, V-OK, S-OK
+        pmntp      T-PMNTP

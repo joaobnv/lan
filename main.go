@@ -43,7 +43,7 @@ func main() {
 		fmt.Fprint(defaultOS.stdout, message)
 		// I think that showing the version helps the user because Lan does not receive command line parameters
 		// that make it show its version.
-		fmt.Fprint(defaultOS.stdout, "\n\tlan version: "+version)
+		fmt.Fprint(defaultOS.stdout, "\n\tlan version: "+version+"\n")
 		defaultOS.exit(1)
 	}
 }
@@ -51,7 +51,7 @@ func main() {
 // run executes the operations.
 func run(workDir string) (denyGit bool, message string) {
 	ops := []operation{
-		newTests(30*time.Second, workDir),
+		newTests(120*time.Second, workDir),
 		newVet(workDir),
 		newStaticcheck(workDir),
 	}

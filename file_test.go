@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 )
 
@@ -52,8 +55,8 @@ func TestResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := []string{
-		"ntf", "tfntf", "sptnt", "t", "futo", "pt", "tpt",
-		"sne", "ps", "tws", "fws", "oif", "fusptop", "se",
+		"ntf", "tfntf", "sptnt", "t", "futo", "pt", "tpt", "sne",
+		"ps", "tws", "fws", "oif", "fusptop", "se", "pmntp",
 	}
 	for _, dir := range cases {
 		t.Run(dir, func(t *testing.T) {
@@ -70,6 +73,74 @@ func TestResults(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTests(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []string{"to"}
+	for _, dir := range cases {
+		t.Run(dir, func(t *testing.T) {
+			t.Parallel()
+			testsFilePath := filepath.Join(wd, "testdata", dir, "tests.txt")
+			if !fileExists(testsFilePath) {
+				return
+			}
+
+			data, err := os.ReadFile(testsFilePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := bytes.Split(data, []byte("\n"))
+			timeout := time.Duration(-1)
+			var remove int
+			for i := range lines {
+				if bytes.HasPrefix(lines[i], []byte("timeout")) {
+					_, d, ok := bytes.Cut(lines[i], []byte("="))
+					if !ok {
+						t.Fatalf("syntax error: missing '=' in %q", string(bytes.TrimSpace(lines[i])))
+					}
+					to, err := time.ParseDuration(string(bytes.TrimSpace(d)))
+					if err != nil {
+						t.Fatalf("syntax error: %s", err)
+					}
+					if timeout != -1 {
+						t.Fatal("syntax error: timeout redeclared")
+					}
+					timeout = to
+					remove = i + 1
+				} else if bytes.HasPrefix(lines[i], []byte("\tlan: ")) {
+					break
+				}
+			}
+
+			expected := bytes.Join(lines[remove:], []byte("\n"))
+
+			if timeout == -1 {
+				timeout = 30 * time.Second
+			}
+
+			op := newTests(timeout, filepath.Join(wd, "testdata", dir))
+			message, err := op.run()
+			denyGit := message != "" || err != nil
+			if err != nil {
+				message = strings.TrimRightFunc(err.Error(), unicode.IsSpace)
+			}
+
+			res := checkResults(denyGit, string(expected), message)
+			if res != "" {
+				t.Error(res)
+			}
+		})
+	}
+}
+
+// fileExists reports whether a file exists.
+func fileExists(name string) bool {
+	_, err := os.Stat(name)
+	return !errors.Is(err, os.ErrNotExist)
 }
 
 func checkResults(denyGit bool, expected, got string) string {
@@ -110,6 +181,9 @@ func checkResults(denyGit bool, expected, got string) string {
 			parts = append(parts, current)
 			current.head = strings.TrimSpace(expLine)
 		} else if !unicode.IsSpace([]rune(expLine)[0]) {
+			if current == nil {
+				return fmt.Sprintf("syntax error: unexpected %q\n", expLine)
+			}
 			expLine = strings.TrimSpace(expLine)
 			reg, err := regexp.Compile(expLine)
 			if err != nil {

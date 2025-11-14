@@ -1,0 +1,3 @@
+timeout=100ns
+	lan: from executing the tests
+to: panic: test timed out after 100ns
