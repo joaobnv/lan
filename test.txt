@@ -39,31 +39,6 @@ there are tests:
         (TT-FWS)         fuzz function with wrong signature
         (TT-OIF)         package with only init functions
         (TT-SE)          package with syntax error
-        test function signature:
-                (TTFS-NP)        without 'Test' prefix
-                (TTFS-LC)        first rune after 'Test' lower case
-                (TTFS-U)         first rune after 'Test' is '_'
-                (TTFS-P*TA)      parameter with type '*T' where T (must be named T) is a alias for 'testing.T'
-                (TTFS-P*T-ID)    parameter with type '*T' where the import of the testing package is 'import . "testing"'
-                (TTFS-P*T-ITT)   parameter with type '*tt.T' where the import of the testing package is
-                                'import tt "testing"'
-                (TTFS-P*T-IO)    parameter with type '*testing.T' where the import of the testing package is
-                                'import "not/the/standard/testing"'
-                (TTFS-P*T-OP-TA) parameter with type '*testing.T' (must be named T) where 'testing' is another package but 'T'
-                                is a alias for the correct T
-        fuzz function signature:
-                (TTFFS-NP)        without 'Fuzz' prefix
-                (TTFFS-LC)        first rune after 'Fuzz' lower case
-                (TTFFS-U)         first rune after 'Fuzz' is '_'
-                (TTFFS-P*FA)      parameter with type '*F' where F (must be named F) is a alias for 'testing.F'
-                (TTFFS-P*F-ID)    parameter with type '*F' where the import of the testing package is
-                                'import . "testing"'
-                (TTFFS-P*F-ITT)   parameter with type '*tt.F' where the import of the testing package is
-                                'import tt "testing"'
-                (TTFFS-P*F-IO)    parameter with type '*testing.F' where the import of the testing package is
-                                'import "not/the/standard/testing"'
-                (TTFFS-P*F-OP-FA) parameter with type '*testing.F' (must be named F) where 'testing' is another package but 'F' is
-                                a alias for the correct F
 
 executing vet:
         (V-A)  the analyzer appends
@@ -87,10 +62,10 @@ executing staticcheck:
 
 tests:
         ntf        T-NTF, TT-NTF, V-A, S-SA1000, S-SA4021,
-        tfntf      T-TF-NT, TT-TF-NT, TTFS-NP, TTFS-LC,
-                   TTFFS-NP, TTFFS-LC, V-P, V-A, S-SA4021
+        tfntf      T-TF-NT, TT-TF-NT,
+                    V-P, V-A, S-SA4021
         sptnt      T-SPT-NT, TT-SPT-NT, V-ST, S-ST1017
-        t          T-T, T-F, TT-TTF-OT, TT-TFUT, TTFS-U, TTFFS-U, V-U, S-SA1000,
+        t          T-T, T-F, TT-TTF-OT, TT-TFUT, V-U, S-SA1000,
                    S-SA4021, S-As
         futo       T-OK, T-FUTO, TT-FUTO, V-A, S-SA4021, V-P, V-As
         pt         T-PT, TT-OFT, TT-PT, V-OK, S-IGN-SA1000
@@ -99,20 +74,13 @@ tests:
         ps         T-Ps, V-Ps, S-Ps
            t       T-T, TT-FUPT, V-A, S-SA4021
            f       T-T, T-F, TT-TFUPT, V-P, S-ST1017
-           exptf   TT-NN (export aliases for testing.T and testing.F)
-           opta    T-T, T-OK, TT-OFT, TTFS-P*T-OP-TA, V-OK, S-OK
-           opfa    T-T, T-OK, TT-OFT, TT-FUTO, TTFFS-P*F-OP-FA, V-OK, S-OK
-           pstitt  T-T, T-OK, TTFS-P*T-ITT, V-OK, S-OK
-           psfitt  T-T, T-OK, TTFFS-P*F-ITT, V-OK, S-OK
-           psta    T-T, T-OK, TTFS-P*TA, V-OK, S-OK
-           pstid   T-T, T-OK, TTFS-P*T-ID, V-OK, S-OK
+           oft     T-T, T-OK, TT-OFT, V-OK, S-OK
+           futo    T-T, T-OK, TT-OFT, TT-FUTO, V-OK, S-OK
            otf     T-T, T-OTF, TT-OTF, V-OK, S-OK
-           psfid   T-T, T-OK, TTFFS-P*F-ID, V-OK, S-OK
-           psfa    T-T, T-OK, TTFFS-P*FA, V-OK, S-OK
            dtf     T-NTF, TT-NTF, TT-NTF-DTF, V-OK, S-OK
-        tws        T-TF-NT, TT-TF-NT, TTFS-P*T-IO, TT-TWS, V-OK
+        tws        T-TF-NT, TT-TF-NT, TT-TWS, V-OK
            testing TT-NN (export types T and F)
-        fws        T-TF-NT, TT-TF-NT, TTFFS-P*F-IO, TT-FWS, V-OK
+        fws        T-TF-NT, TT-TF-NT, TT-FWS, V-OK
            testing TT-NN (export types T and F)
         oif        T-NTF, TT-NTF, TT-OIF, V-OK, S-OK
         fusptop    T-T, TT-FUSP-TOP
