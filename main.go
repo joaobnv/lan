@@ -50,8 +50,11 @@ func main() {
 
 // run executes the operations.
 func run(workDir string) (denyGit bool, message string) {
+	const testTimeout = 120 * time.Second
+
 	ops := []operation{
-		newTests(120*time.Second, workDir),
+		newBuild(workDir),
+		newTests(testTimeout, workDir),
 		newVet(workDir),
 		newStaticcheck(workDir),
 	}
@@ -79,7 +82,6 @@ func run(workDir string) (denyGit bool, message string) {
 	}()
 
 	results := make([]operationResult, len(ops))
-
 	for or := range chOperationResult {
 		results[or.pos] = or
 	}
@@ -101,6 +103,53 @@ type operation interface {
 	// run executes a operation and returns the message, without white space at end. If the result of the
 	// execution doesn't denies git then the empty string will be returned in message.
 	run() (message string, err error)
+}
+
+// build is a operation that executes the build.
+type build struct {
+	workDir string
+	os      operatingSystem
+}
+
+func newBuild(workDir string) operation {
+	return build{workDir: workDir, os: newOperatingSystem()}
+}
+
+// run builds the package and their subpackages. To do the build we use the option '-c' of 'go test'.
+func (b build) run() (message string, err error) {
+	stdout := new(bytes.Buffer)
+	cmd := b.os.newCmd(b.workDir, stdout, nil, "go", "test", "-c", "-json", "-vet=off", "-o="+os.DevNull, "."+string(os.PathSeparator)+"...")
+	err = cmd.Run()
+	if _, isExitError := errors.AsType[*exec.ExitError](err); err != nil && !isExitError {
+		return
+	}
+
+	buildOk, err := b.result(stdout)
+	if err != nil {
+		return
+	}
+
+	if !buildOk {
+		return "\tlan: from building\nbuild failed", nil
+	}
+
+	return
+}
+
+// result decodes r and reports whether the build was ok.
+func (t build) result(r io.Reader) (buildOk bool, err error) {
+	dec := jsontext.NewDecoder(r)
+	for {
+		var te testEvent
+		if err = json.UnmarshalDecode(dec, &te); err == io.EOF {
+			return true, nil
+		} else if err != nil {
+			return false, err
+		}
+		if te.Action == "build-fail" {
+			return false, nil
+		}
+	}
 }
 
 // tests is a operation that executes the tests.
@@ -167,7 +216,7 @@ func (t tests) run() (message string, err error) {
 		if t.buildFailed(rs) {
 			// we return before testing a error from thereAreTests because we dont want
 			// the message from the packages.Load failure.
-			return "", fmt.Errorf("\tlan: from executing the tests\nbuild failed")
+			return "\tlan: from executing the tests\nbuild failed", nil
 		}
 	}
 

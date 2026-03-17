@@ -1,2 +1,8 @@
+	lan: from building
+build failed
 	lan: from executing the tests
 build failed
+	lan: from go vet (unordered, not all)
+.*
+	lan: from staticcheck (unordered, not all)
+.*

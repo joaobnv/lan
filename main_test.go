@@ -56,9 +56,10 @@ func TestCmdRunError(t *testing.T) {
 	t.Setenv("PATH", wd)
 
 	cases := []struct{ op operation }{
+		{op: newBuild(wd)},
+		{op: newTests(1*time.Second, wd)},
 		{op: newVet(wd)},
 		{op: newStaticcheck(wd)},
-		{op: newTests(1*time.Second, wd)},
 	}
 	for _, c := range cases {
 		t.Run(fmt.Sprintf("%T", c.op), func(t *testing.T) {
@@ -66,6 +67,48 @@ func TestCmdRunError(t *testing.T) {
 				t.Errorf("run did not return a error")
 			}
 		})
+	}
+
+	denyGit, message := run(wd)
+	if !denyGit || message == "" {
+		t.Errorf("not deny git or message is empty")
+	}
+}
+
+// tests the case where the "go test" command generates a result that is not JSON in the operation build.
+// To do this we replace the go command by another that dont generates JSON.
+func TestCmdNoJson_build(t *testing.T) {
+	t.Chdir(path.Join("testdata", "nojson"))
+
+	goPath, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := exec.Command(goPath, "clean").Run(); err != nil {
+		panic(err)
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", wd)
+
+	if err := exec.Command(goPath, "build", "go.go").Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() {
+		if err := exec.Command(goPath, "clean").Run(); err != nil {
+			panic(err)
+		}
+	})
+
+	op := newBuild(wd)
+	if _, err := op.run(); err == nil {
+		t.Error("err = nil")
 	}
 }
 
@@ -110,8 +153,8 @@ func TestCreateTempError(t *testing.T) {
 	}
 }
 
-// tests the case where the "go test" command generates a result that is not JSON. To do this
-// we replace the go command by another that dont generates JSON.
+// tests the case where the "go test" command generates a result that is not JSON in the operations tests.
+// To do this we replace the go command by another that dont generates JSON.
 func TestCmdNoJson_tests(t *testing.T) {
 	t.Chdir(path.Join("testdata", "nojson"))
 
