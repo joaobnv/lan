@@ -1,8 +1,2 @@
-	lan: from building
-build failed
-	lan: from executing the tests
-build failed
-	lan: from go vet
+	lan: error
 found packages sub \(sub.go\) and sum \(sum.go\) in .*
-	lan: from staticcheck
--: found packages sub \(sub.go\) and sum \(sum.go\) in .*

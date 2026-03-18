@@ -61,7 +61,7 @@ executing staticcheck:
 
 
 tests:
-        ntf        T-NTF, TT-NTF, V-A, S-SA1000, S-SA4021,
+        ntf        T-NTF, TT-NTF, V-OK, S-SA1000,
         tfntf      T-TF-NT, TT-TF-NT,
                     V-P, V-A, S-SA4021
         sptnt      T-SPT-NT, TT-SPT-NT, V-ST, S-ST1017
@@ -87,3 +87,4 @@ tests:
         se         T-SE, TT-SE
         to         T-TO, V-OK, S-OK
         pmntp      T-PMNTP
+        f          T-F, TT-OFT, V-OK, S-OK

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -53,26 +55,359 @@ func TestCmdRunError(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	opSys := newOperatingSystem()
+	prevNewCmd := opSys.newCmd
+	opSys.newCmd = func(ctx context.Context, workDir string, stdout, stderr io.Writer, name string, args ...string) command {
+		if args[0] == "tool" { // running "go tool"
+			return testCmd(func() error { return errors.New("go not found") })
+		}
+		return prevNewCmd(t.Context(), workDir, stdout, stderr, name, args...)
+	}
+
+	pkgs, err := listPackages(wd, opSys)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	t.Setenv("PATH", wd)
 
 	cases := []struct{ op operation }{
-		{op: newBuild(wd)},
-		{op: newTests(1*time.Second, wd)},
-		{op: newVet(wd)},
-		{op: newStaticcheck(wd)},
+		{op: newBuild(wd, opSys)},
+		{op: newTests(1*time.Second, wd, opSys)},
+		{op: newVet(wd, opSys)},
+		{op: newStaticcheck(wd, opSys)},
 	}
+
 	for _, c := range cases {
 		t.Run(fmt.Sprintf("%T", c.op), func(t *testing.T) {
-			if _, err := c.op.run(); err == nil {
+			if _, err := c.op.run(t.Context(), pkgs); err == nil {
 				t.Errorf("run did not return a error")
 			}
 		})
 	}
 
-	denyGit, message := run(wd)
+	denyGit, message := run(wd, opSys)
 	if !denyGit || message == "" {
 		t.Errorf("not deny git or message is empty")
 	}
+}
+
+// test the case where a operation returns a error
+func TestRunOpError(t *testing.T) {
+	t.Chdir(path.Join("testdata", "fusptop"))
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opSys := newOperatingSystem()
+	prevNewCmd := opSys.newCmd
+	opSys.newCmd = func(ctx context.Context, workDir string, stdout, stderr io.Writer, name string, args ...string) command {
+		if args[0] == "tool" { // running "go tool"
+			return testCmd(func() error { return errors.New("go not found") })
+		}
+		return prevNewCmd(t.Context(), workDir, stdout, stderr, name, args...)
+	}
+
+	denyGit, message := run(wd, opSys)
+	if !denyGit || message == "" {
+		t.Errorf("not deny git or message is empty")
+	}
+}
+
+func TestOpGroupError(t *testing.T) {
+	t.Parallel()
+	const N = 3
+
+	var done []chan struct{}
+	var msgs []string
+	var errs []error
+	var ops []op
+	var numbers []int
+
+	for n := range N {
+		done = append(done, make(chan struct{}))
+		msgs = append(msgs, "")
+		errs = append(errs, nil)
+		ops = append(ops, func(context.Context, []string) (string, error) { <-done[n]; return msgs[n], errs[n] })
+		numbers = append(numbers, n)
+	}
+
+	for errorsUntil := range N + 1 {
+		for _, perm := range perms(numbers) {
+			for n := range N {
+				msgs[n] = ""
+				errs[n] = nil
+			}
+			for _, n := range perm[:errorsUntil] {
+				errs[n] = fmt.Errorf("error from op %d", n)
+			}
+			if errorsUntil > 0 {
+				for n := 1 + slices.Min(perm[:errorsUntil]); n < N; n++ {
+					msgs[n] = fmt.Sprintf("message from op %d", n)
+				}
+			}
+
+			var wantedError error
+			for n := range N {
+				if errs[n] != nil {
+					wantedError = errs[n]
+					break
+				}
+			}
+
+			eg := newOpGroup()
+			for n := range N {
+				eg.executeGo(t.Context(), ops[n], nil)
+			}
+
+			go func() {
+				for i, n := range perm {
+					done[n] <- struct{}{}
+					eg.done.L.Lock()
+					for eg.numberEnded < i+1 {
+						eg.done.Wait()
+					}
+					eg.done.L.Unlock()
+				}
+			}()
+
+			_, err := eg.wait()
+			if err != wantedError {
+				t.Errorf("for {perm: %v, errorsUntil: %d}: got %q, want %q", perm, errorsUntil, err, wantedError)
+			}
+
+			// check for leaks. If has one, then this test will not end.
+			eg.done.L.Lock()
+			for eg.numberEnded != N {
+				eg.done.Wait()
+			}
+			eg.done.L.Unlock()
+		}
+	}
+}
+
+func TestOpGroupMessages(t *testing.T) {
+	t.Parallel()
+	const N = 3
+
+	var done []chan struct{}
+	var msgs []string
+	var errs []error
+	var ops []op
+	var numbers []int
+
+	for n := range N {
+		done = append(done, make(chan struct{}))
+		msgs = append(msgs, "")
+		errs = append(errs, nil)
+		ops = append(ops, func(context.Context, []string) (string, error) { <-done[n]; return msgs[n], errs[n] })
+		numbers = append(numbers, n)
+	}
+
+	for messagesUntil := range N + 1 {
+		for _, perm := range perms(numbers) {
+			for n := range N {
+				msgs[n] = ""
+				errs[n] = nil
+			}
+			for _, n := range perm[:messagesUntil] {
+				msgs[n] = fmt.Sprintf("message from op %d", n)
+			}
+			if messagesUntil > 0 {
+				for n := 1 + slices.Min(perm[:messagesUntil]); n < N; n++ {
+					errs[n] = fmt.Errorf("error from op %d", n)
+				}
+			}
+
+			var wantedMessage string
+			for n := range N {
+				if msgs[n] != "" {
+					wantedMessage = msgs[n]
+					break
+				}
+			}
+
+			eg := newOpGroup()
+			for n := range N {
+				eg.executeGo(t.Context(), ops[n], nil)
+			}
+
+			go func() {
+				for i, n := range perm {
+					done[n] <- struct{}{}
+					eg.done.L.Lock()
+					for eg.numberEnded < i+1 {
+						eg.done.Wait()
+					}
+					eg.done.L.Unlock()
+				}
+			}()
+
+			msg, _ := eg.wait()
+			if msg != wantedMessage {
+				t.Errorf("for {perm: %v, errorsUntil: %d}: got %q, want %q", perm, messagesUntil, msg, wantedMessage)
+			}
+
+			// check for leaks. If has one, then this test will not end.
+			eg.done.L.Lock()
+			for eg.numberEnded != N {
+				eg.done.Wait()
+			}
+			eg.done.L.Unlock()
+		}
+	}
+}
+
+func TestPkgOpGroupError(t *testing.T) {
+	t.Parallel()
+	const N = 3
+
+	var done []chan struct{}
+	var errs []error
+	var ops []pkgOp
+	var numbers []int
+
+	for n := range N {
+		done = append(done, make(chan struct{}))
+		errs = append(errs, nil)
+		ops = append(ops, func(context.Context, string) (string, error) { <-done[n]; return "", errs[n] })
+		numbers = append(numbers, n)
+	}
+
+	for errorsUntil := range N + 1 {
+		for _, doneOrder := range perms(numbers) {
+			for n := range N {
+				errs[n] = nil
+			}
+			for _, n := range doneOrder[:errorsUntil] {
+				errs[n] = fmt.Errorf("error from op %d", n)
+			}
+
+			wantedError := errs[doneOrder[0]]
+
+			eg := newPkgOpGroup()
+			for n := range N {
+				eg.executeGo(t.Context(), ops[n], "")
+			}
+
+			go func() {
+				for i, n := range doneOrder {
+					done[n] <- struct{}{}
+					eg.done.L.Lock()
+					for eg.numberEnded < i+1 {
+						eg.done.Wait()
+					}
+					eg.done.L.Unlock()
+				}
+			}()
+
+			_, err := eg.wait()
+			if err != wantedError {
+				t.Errorf("for {doneOrder: %v, errorsUntil: %d}: got %q, want %q", doneOrder, errorsUntil, err, wantedError)
+			}
+
+			// check for leaks. If has one, then this test will not end.
+			eg.done.L.Lock()
+			for eg.numberEnded != N {
+				eg.done.Wait()
+			}
+			eg.done.L.Unlock()
+		}
+	}
+}
+
+func TestPkgOpGroupMessages(t *testing.T) {
+	t.Parallel()
+	const N = 3
+
+	var done []chan struct{}
+	var msgs []string
+	var ops []pkgOp
+	var numbers []int
+
+	for n := range N {
+		done = append(done, make(chan struct{}))
+		msgs = append(msgs, "")
+		ops = append(ops, func(context.Context, string) (string, error) { <-done[n]; return msgs[n], nil })
+		numbers = append(numbers, n)
+	}
+
+	for messagesUntil := range N + 1 {
+		for _, doneOrder := range perms(numbers) {
+			for n := range N {
+				msgs[n] = ""
+			}
+			for _, n := range doneOrder[:messagesUntil] {
+				msgs[n] = fmt.Sprintf("message from op %d", n)
+			}
+
+			wantedMessage := msgs[doneOrder[0]]
+
+			eg := newPkgOpGroup()
+			for n := range N {
+				eg.executeGo(t.Context(), ops[n], "")
+			}
+
+			go func() {
+				for i, n := range doneOrder {
+					done[n] <- struct{}{}
+					eg.done.L.Lock()
+					for eg.numberEnded < i+1 {
+						eg.done.Wait()
+					}
+					eg.done.L.Unlock()
+				}
+			}()
+
+			msg, _ := eg.wait()
+			if msg != wantedMessage {
+				t.Errorf("for {doneOrder: %v, messagesUntil: %d}: got %q, want %q", doneOrder, messagesUntil, msg, wantedMessage)
+			}
+
+			// check for leaks. If has one, then this test will not end.
+			eg.done.L.Lock()
+			for eg.numberEnded != N {
+				eg.done.Wait()
+			}
+			eg.done.L.Unlock()
+		}
+	}
+}
+
+type op func(ctx context.Context, packages []string) (message string, err error)
+
+func (o op) run(ctx context.Context, packages []string) (message string, err error) {
+	return o(ctx, packages)
+}
+
+type pkgOp func(ctx context.Context, pkg string) (message string, err error)
+
+func (po pkgOp) run(ctx context.Context, pkg string) (message string, err error) {
+	return po(ctx, pkg)
+}
+
+func perms(a []int) (ps [][]int) {
+	if len(a) <= 1 {
+		ps = append(ps, slices.Clone(a))
+		return
+	}
+
+	n := len(a) - 1
+	a = slices.Clone(a)
+	for i := range a {
+		a[n], a[i] = a[i], a[n]
+		for _, p := range perms(a[:n]) {
+			p = append(p, a[n])
+			ps = append(ps, p)
+		}
+		a[n], a[i] = a[i], a[n]
+	}
+
+	slices.SortFunc(ps, slices.Compare)
+
+	return ps
 }
 
 // tests the case where the "go test" command generates a result that is not JSON in the operation build.
@@ -106,15 +441,18 @@ func TestCmdNoJson_build(t *testing.T) {
 		}
 	})
 
-	op := newBuild(wd)
-	if _, err := op.run(); err == nil {
+	pkgs, err := listPackages(wd, newOperatingSystem())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	op := newBuild(wd, newOperatingSystem())
+	if _, err := op.run(t.Context(), pkgs); err == nil {
 		t.Error("err = nil")
 	}
 }
 
-// tests the case where the path used by thereAreTests is invalid.
-// In this case we expect that packages.Load returns an error.
-func TestPackageLoadError(t *testing.T) {
+func TestBuildCmdError(t *testing.T) {
 	t.Parallel()
 
 	wd, err := os.Getwd()
@@ -122,11 +460,96 @@ func TestPackageLoadError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	op := newTests(30*time.Second, filepath.Join(wd, "testdata", "fusptop")).(tests)
+	cases := []struct {
+		output   string
+		runError error
+	}{
+		{output: "<Language>Go</Language>"},
+		{runError: io.EOF},
+	}
+
+	pkgs, err := listPackages(wd, newOperatingSystem())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range cases {
+		b := newBuild(wd, newOperatingSystem()).(build)
+		b.os.newCmd = func(ctx context.Context, worDir string, stdout, stderr io.Writer, name string, args ...string) command {
+			return testCmd(func() error { io.WriteString(stdout, c.output); return c.runError })
+		}
+
+		if _, err = b.run(t.Context(), pkgs); err == nil {
+			t.Error("err == nil")
+		}
+	}
+}
+
+// tests the case where the path used by thereAreTests is invalid.
+// In this case we expect that packages.Load returns an error.
+func TestThereAreTestsPackageLoadError(t *testing.T) {
+	t.Parallel()
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	op := newThereAreTests(filepath.Join(wd, "testdata", "fusptop"), newOperatingSystem()).(thereAreTests)
 	// I think \x00 is not allowed in Linux and Windows.
-	op.tat.packagesPath = "\x00<\\/>"
-	if _, err := op.run(); err == nil {
+	if _, err := op.run(t.Context(), []string{"\x00<\\/>"}); err == nil {
 		t.Errorf("err = nil, want an error explaining that the path is invalid")
+	}
+}
+
+func TestThereAreTestsRunError(t *testing.T) {
+	t.Parallel()
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b := newThereAreTests(wd, newOperatingSystem()).(thereAreTests)
+	b.os.newCmd = func(ctx context.Context, worDir string, stdout, stderr io.Writer, name string, args ...string) command {
+		return testCmd(func() error { return io.EOF })
+	}
+
+	pkgs, err := listPackages(wd, newOperatingSystem())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err = b.run(t.Context(), pkgs); err == nil {
+		t.Error("err == nil")
+	}
+}
+
+func TestThereAreTestsPkgBuildError(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wd = filepath.Join(wd, "testdata", "se")
+	t.Chdir(wd)
+
+	op := newThereAreTestsPkg(wd, newOperatingSystem()).(thereAreTestsPkg)
+
+	pkgs, err := listPackages(wd, newOperatingSystem())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err = op.run(t.Context(), pkgs[0]); err == nil {
+		t.Error("run: err == nil")
+	}
+
+	if _, err = op.need(t.Context(), pkgs[0]); err == nil {
+		t.Error("need: err == nil")
+	}
+
+	if _, err = op.has(t.Context(), pkgs[0]); err == nil {
+		t.Error("has: err == nil")
 	}
 }
 
@@ -139,14 +562,19 @@ func TestCreateTempError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	op := newTests(1*time.Second, filepath.Join(wd, "testdata", "t")).(tests)
+	op := newTests(1*time.Second, wd, newOperatingSystem()).(tests)
 	errorMsg := "CreateTemp: error"
 	op.os.createTemp = func(dir, pattern string) (*os.File, error) {
 		return nil, errors.New("CreateTemp: error")
 	}
 	op.os.remove = nil
 
-	if _, err := op.run(); err == nil {
+	pkgs, err := listPackages(wd, newOperatingSystem())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := op.run(t.Context(), pkgs); err == nil {
 		t.Errorf("err = nil")
 	} else if err.Error() != errorMsg {
 		t.Errorf("err.Error() = %q, want %q", err.Error(), errorMsg)
@@ -186,9 +614,64 @@ func TestCmdNoJson_tests(t *testing.T) {
 		}
 	})
 
-	op := newTests(1*time.Millisecond, wd)
-	if _, err := op.run(); err == nil {
+	pkgs, err := listPackages(wd, newOperatingSystem())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	op := newTests(1*time.Millisecond, wd, newOperatingSystem())
+	if _, err := op.run(t.Context(), pkgs); err == nil {
 		t.Error("err = nil")
+	}
+}
+
+// tests the case where the "go test" command generates a result that is not JSON, in
+// the operation thereAreTests. To do this we replace the go command by another that
+// dont generates JSON.
+func TestCmdNoJson_thereAreTests(t *testing.T) {
+	goPath, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(path.Join("testdata", "nojson"))
+
+	// to handle the case where an error in a previous execution of the tests resulted
+	// in the executable remaining in the folder.
+	if err := exec.Command(goPath, "clean").Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", wd)
+
+	if err := exec.Command(goPath, "build", "go.go").Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() {
+		if err := exec.Command(goPath, "clean").Run(); err != nil {
+			panic(err)
+		}
+	})
+
+	pkgs, err := listPackages(wd, newOperatingSystem())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	op := newThereAreTests(wd, newOperatingSystem())
+	if _, err = op.run(t.Context(), pkgs); err == nil {
+		t.Error("err == nil")
+	}
+
+	pkgOp := newThereAreTestsPkg(wd, newOperatingSystem()).(thereAreTestsPkg)
+	if _, err = pkgOp.has(t.Context(), "main"); err == nil {
+		t.Error("err == nil")
 	}
 }
 
@@ -200,14 +683,20 @@ func TestCoverProfileOpenError_tests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	wd = filepath.Join(wd, "testdata", "fusptop")
 
-	op := newTests(1*time.Millisecond, filepath.Join(wd, "testdata", "fusptop")).(tests)
+	op := newTests(1*time.Millisecond, wd, newOperatingSystem()).(tests)
 	errMsg := "Open: error"
 	op.os.open = func(name string) (io.ReadCloser, error) {
 		return nil, errors.New(errMsg)
 	}
 
-	if _, err = op.run(); err == nil {
+	pkgs, err := listPackages(wd, newOperatingSystem())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err = op.run(t.Context(), pkgs); err == nil {
 		t.Error("err = nil")
 	} else if err.Error() != errMsg {
 		t.Errorf("err.Error() = %q, want %q", err.Error(), errMsg)
@@ -222,14 +711,20 @@ func TestScannerError_tests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	wd = filepath.Join(wd, "testdata", "fusptop")
 
-	op := newTests(1*time.Millisecond, filepath.Join(wd, "testdata", "fusptop")).(tests)
+	op := newTests(1*time.Millisecond, wd, newOperatingSystem()).(tests)
 	errMsg := "scanner: error"
 	op.os.open = func(name string) (io.ReadCloser, error) {
 		return io.NopCloser(iotest.ErrReader(errors.New(errMsg))), nil
 	}
 
-	if _, err := op.run(); err == nil {
+	pkgs, err := listPackages(wd, newOperatingSystem())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := op.run(t.Context(), pkgs); err == nil {
 		t.Error("err = nil")
 	} else if err.Error() != errMsg {
 		t.Errorf("err.Error() = %q, want %q", err.Error(), errMsg)
@@ -247,7 +742,7 @@ func TestStaticcheckNotFoundInTheSystem(t *testing.T) {
 
 	t.Setenv("PATH", wd)
 
-	op := newStaticcheck(filepath.Join(wd, "testdata", "fusptop")).(staticcheck)
+	op := newStaticcheckPkg(filepath.Join(wd, "testdata", "fusptop"), newOperatingSystem()).(staticcheckPkg)
 	if cmd, err := op.installedInTheSystem(); cmd != nil || err != nil {
 		t.Errorf("cmd = %v and err == %q, want cmd = <nil> and error = <nil>", cmd, err)
 	}
@@ -273,7 +768,7 @@ func TestStaticcheckLookPathError(t *testing.T) {
 	// return ErrDot.
 	t.Setenv("PATH", "."+string(os.PathListSeparator)+path.Join(wd, "testdata"))
 
-	op := newStaticcheck(filepath.Join(wd, "testdata", "staticcheckcmd")).(staticcheck)
+	op := newStaticcheckPkg(filepath.Join(wd, "testdata", "staticcheckcmd"), newOperatingSystem()).(staticcheckPkg)
 	if _, err := op.installedInTheSystem(); !errors.Is(err, exec.ErrDot) {
 		t.Errorf("want err = exec.ErrDot, found %v", err)
 	}
@@ -286,12 +781,19 @@ func TestStaticcheckCommandError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	dir = filepath.Join(dir, "testdata", "fusptop")
 
-	t.Chdir(path.Join("testdata", "fusptop"))
-	t.Setenv("PATH", path.Join(dir, "testdata", "testfail"))
+	pkgs, err := listPackages(dir, newOperatingSystem())
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	op := newStaticcheck(filepath.Join(dir, "testdata", "fusptop"))
-	if _, err := op.run(); err == nil {
+	t.Chdir(filepath.Join("testdata", "fusptop"))
+	t.Setenv("PATH", filepath.Join(dir, "testdata", "testfail"))
+
+	op := newStaticcheck(dir, newOperatingSystem())
+
+	if _, err := op.run(t.Context(), pkgs); err == nil {
 		t.Error("want err != nil, found nil")
 	}
 }
@@ -305,26 +807,33 @@ func TestStaticcheckError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	wd = filepath.Join(wd, "testdata", "fusptop")
 
-	op := newStaticcheck(filepath.Join(wd, "testdata", "fusptop")).(staticcheck)
+	op := newStaticcheck(wd, newOperatingSystem()).(staticcheck)
 	prevNewCmd := op.os.newCmd
 	errorMsg := "failed to execute command"
-	op.os.newCmd = func(workDir string, stdout, stderr io.Writer, name string, args ...string) command {
+	op.os.newCmd = func(ctx context.Context, workDir string, stdout, stderr io.Writer, name string, args ...string) command {
 		if args[0] == "tool" { // running "go tool"
-			return prevNewCmd(workDir, stdout, stderr, name, args...)
+			return prevNewCmd(t.Context(), workDir, stdout, stderr, name, args...)
 		}
-		return cmd(func() error { return errors.New(errorMsg) })
+		return testCmd(func() error { return errors.New(errorMsg) })
 	}
-	if _, err := op.run(); err == nil {
+
+	pkgs, err := listPackages(wd, newOperatingSystem())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := op.run(t.Context(), pkgs); err == nil {
 		t.Errorf("err == nil")
 	} else if err.Error() != "\tlan: from staticcheck\n"+errorMsg {
 		t.Errorf("want error.Error() == %s, got %s", errorMsg, err.Error())
 	}
 }
 
-type cmd func() error
+type testCmd func() error
 
-func (c cmd) Run() error {
+func (c testCmd) Run() error {
 	return c()
 }
 

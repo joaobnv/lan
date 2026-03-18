@@ -9,5 +9,5 @@ func Append(v []string, e string) []string {
 	if !reg.MatchString(e) {
 		return v
 	}
-	return append(v)
+	return v
 }

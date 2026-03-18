@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,13 @@ import (
 	"time"
 	"unicode"
 )
+
+var resultFilesToTest *string
+
+func init() {
+	resultFilesToTest = flag.String("pft", `ntf, tfntf, sptnt, t, futo, pt, tpt, sne,
+		ps, tws, fws, oif, fusptop, se, pmntp, f`, "the packages, in testdata, to test")
+}
 
 func TestResultMain(t *testing.T) {
 	wd, err := os.Getwd()
@@ -54,14 +62,16 @@ func TestResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cases := []string{
-		"ntf", "tfntf", "sptnt", "t", "futo", "pt", "tpt", "sne",
-		"ps", "tws", "fws", "oif", "fusptop", "se", "pmntp",
+
+	var cases []string
+	for pkg := range strings.SplitSeq(*resultFilesToTest, ",") {
+		cases = append(cases, strings.TrimSpace(pkg))
 	}
+
 	for _, dir := range cases {
 		t.Run(dir, func(t *testing.T) {
 			t.Parallel()
-			denyGit, message := run(filepath.Join(wd, "testdata", dir))
+			denyGit, message := run(filepath.Join(wd, "testdata", dir), newOperatingSystem())
 
 			expected, err := os.ReadFile(filepath.Join(wd, "testdata", dir, "result.txt"))
 			if err != nil {
@@ -80,7 +90,7 @@ func TestTests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cases := []string{"to"}
+	cases := []string{"to", "se"}
 	for _, dir := range cases {
 		t.Run(dir, func(t *testing.T) {
 			t.Parallel()
@@ -122,8 +132,13 @@ func TestTests(t *testing.T) {
 				timeout = 30 * time.Second
 			}
 
-			op := newTests(timeout, filepath.Join(wd, "testdata", dir))
-			message, err := op.run()
+			wd := filepath.Join(wd, "testdata", dir)
+			op := newTests(timeout, wd, newOperatingSystem())
+			pkgs, err := listPackages(wd, newOperatingSystem())
+			if err != nil {
+				t.Fatal(err)
+			}
+			message, err := op.run(t.Context(), pkgs)
 			denyGit := message != "" || err != nil
 			if err != nil {
 				message = strings.TrimRightFunc(err.Error(), unicode.IsSpace)

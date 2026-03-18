@@ -1,10 +1,2 @@
-	lan: from executing the tests (not all, unordered)
-ps/f: FuzzSub failed
 	lan: from checking if there are tests (unordered)
 ps/dtf has no tests
-	lan: from go vet (not all, unordered)
-t[\\/]t\.go:10:\d+: append with no values$
-f[\\/]f_test\.go:15:\d+: .*Errorf format %s has arg a of wrong type int$
-	lan: from staticcheck (unordered)
-f[\\/]f_test\.go:14:\d+: .* \(ST1017\)$
-t[\\/]t\.go:10:\d+: .* \(SA4021\)$

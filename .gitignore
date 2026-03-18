@@ -27,5 +27,8 @@ go.work.sum
 # vscode config
 .vscode
 
-# the message of the next commit.
-commit-msg.txt
+# the messages of the commits.
+commit-msg
+
+# propositions of ideas and discussion. 
+issues
