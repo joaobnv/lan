@@ -54,25 +54,20 @@ type runConfig struct {
 
 // run executes the operations.
 func run(cfg runConfig) (denyGit bool, message string) {
-	pkgs, err := listPackages(cfg.workDir, cfg.os)
-	if err != nil {
-		return true, strings.TrimRightFunc(err.Error(), unicode.IsSpace)
-	}
-
 	if cfg.testTimeout == 0 {
-		cfg.testTimeout = 120 * time.Second
+		cfg.testTimeout = 240 * time.Second
 	}
 
 	og := newOpGroup()
 	ctx := context.Background()
 
-	og.executeGo(ctx, newBuild(cfg.workDir, cfg.os), pkgs)
-	og.executeGo(ctx, newThereAreTests(cfg.workDir, cfg.os), pkgs)
-	og.executeGo(ctx, newVet(cfg.workDir, cfg.os), pkgs)
-	og.executeGo(ctx, newStaticcheck(cfg.workDir, cfg.os), pkgs)
-	og.executeGo(ctx, newTests(cfg.testTimeout, cfg.workDir, cfg.os), pkgs)
+	og.executeGo(ctx, newBuild(cfg.workDir, cfg.os))
+	og.executeGo(ctx, newThereAreTests(cfg.workDir, cfg.os))
+	og.executeGo(ctx, newVet(cfg.workDir, cfg.os))
+	og.executeGo(ctx, newStaticcheck(cfg.workDir, cfg.os))
+	og.executeGo(ctx, newTests(cfg.testTimeout, cfg.workDir, cfg.os))
 
-	message, err = og.wait()
+	message, err := og.wait()
 	if err != nil {
 		return true, strings.TrimRightFunc(err.Error(), unicode.IsSpace)
 	}
@@ -80,39 +75,11 @@ func run(cfg runConfig) (denyGit bool, message string) {
 	return message != "", message
 }
 
-func listPackages(workDir string, opSys operatingSystem) (pkgs []string, err error) {
-	stdout := new(bytes.Buffer)
-	stderr := new(strings.Builder)
-	cmd := opSys.newCmd(context.Background(), workDir, stdout, stderr, "go", "list", "."+string(os.PathSeparator)+"...")
-	err = cmd.Run()
-	if _, isExitError := errors.AsType[*exec.ExitError](err); err != nil && !isExitError {
-		return
-	}
-	err = nil
-
-	if stderr.Len() > 0 {
-		return nil, errors.New("\tlan: error\n" + stderr.String())
-	}
-
-	for line := range bytes.Lines(stdout.Bytes()) {
-		pkgs = append(pkgs, string(bytes.TrimSpace(line)))
-	}
-
-	return
-}
-
 // operation is a operation that can deny a git from proceding.
 type operation interface {
 	// run executes a operation and returns the message, without white space at end. If the result of the
 	// execution doesn't denies git then the empty string will be returned in message.
-	run(ctx context.Context, packages []string) (message string, err error)
-}
-
-// packageOperation is operates in only one packages.
-type packageOperation interface {
-	// run executes a operation and returns the message, without white space at end. If the result of the
-	// execution doesn't denies git then the empty string will be returned in message.
-	run(ctx context.Context, pkg string) (message string, err error)
+	run(ctx context.Context) (message string, err error)
 }
 
 // opGroup executes operations. The method wait returns the first failure, if any.
@@ -138,7 +105,7 @@ func newOpGroup() *opGroup {
 	return &opGroup{resultCh: make(chan opGroupOperationResult), done: sync.NewCond(&sync.Mutex{})}
 }
 
-func (eg *opGroup) executeGo(ctx context.Context, op operation, pkgs []string) {
+func (eg *opGroup) executeGo(ctx context.Context, op operation) {
 	eg.ops = append(eg.ops, op)
 	eg.rs = append(eg.rs, opGroupOperationResult{})
 	ctx, cancel := context.WithCancel(ctx)
@@ -146,7 +113,7 @@ func (eg *opGroup) executeGo(ctx context.Context, op operation, pkgs []string) {
 
 	pos := len(eg.ops) - 1
 	eg.wg.Go(func() {
-		message, err := op.run(ctx, pkgs)
+		message, err := op.run(ctx)
 		eg.resultCh <- opGroupOperationResult{
 			message: message, err: err, pos: pos, done: true,
 		}
@@ -187,6 +154,362 @@ type opGroupOperationResult struct {
 	pos     int
 	err     error
 	done    bool
+}
+
+// build is a operation that executes the build for each package.
+type build struct {
+	workDir string
+	os      operatingSystem
+}
+
+func newBuild(workDir string, opSys operatingSystem) operation {
+	return build{workDir: workDir, os: opSys}
+}
+
+// run builds the packages.
+func (b build) run(ctx context.Context) (message string, err error) {
+	stdout := new(bytes.Buffer)
+
+	cmd := b.os.newCmd(ctx, b.workDir, stdout, nil,
+		"go", "test", "-c", "-json", "-vet=off", "-o="+os.DevNull, "."+string(os.PathSeparator)+"...")
+	err = cmd.Run()
+	if _, isExitError := errors.AsType[*exec.ExitError](err); err != nil && !isExitError {
+		return message, fmt.Errorf("\tlan: from building\n%w", err)
+	}
+
+	buildOk, err := b.result(stdout)
+
+	if err != nil {
+		return "", fmt.Errorf("\tlan: from building\n%w", err)
+	}
+
+	if !buildOk {
+		return "\tlan: from building\nbuild failed", nil
+	}
+
+	return
+}
+
+// result decodes r and reports whether the build was ok.
+func (t build) result(r io.Reader) (buildOk bool, err error) {
+	buildOk = true
+
+	dec := jsontext.NewDecoder(r)
+	for {
+		var te testEvent
+		if err = json.UnmarshalDecode(dec, &te); err == io.EOF {
+			return buildOk, nil
+		} else if err != nil {
+			return false, err
+		}
+		if te.Action == "build-fail" {
+			buildOk = false
+		}
+	}
+}
+
+// thereAreTests check if the packages need and have tests.
+type thereAreTests struct {
+	workDir string
+	os      operatingSystem
+}
+
+func newThereAreTests(workDir string, opSys operatingSystem) operation {
+	return thereAreTests{workDir: workDir, os: opSys}
+}
+
+// run checks if the packages need and have tests.
+func (t thereAreTests) run(ctx context.Context) (message string, err error) {
+	need, err := t.need(ctx)
+	if err != nil {
+		return
+	}
+	has, err := t.has(ctx)
+	if err != nil {
+		return
+	}
+
+	for _, needPkg := range need {
+		if !slices.Contains(has, needPkg) {
+			return fmt.Sprintf("\tlan: from checking if there are tests\n%s has no tests", needPkg), nil
+		}
+	}
+
+	return "", nil
+}
+
+// need returns the packages that need tests.
+func (t thereAreTests) need(ctx context.Context) ([]string, error) {
+	// We dont support folders with multiple non-test packages.
+	var result []string
+
+	cfg := &packages.Config{
+		Dir:     t.workDir,
+		Context: ctx,
+		Mode:    packages.NeedSyntax | packages.NeedFiles | packages.NeedName,
+	}
+	pkgs, err := packages.Load(cfg, "."+string(os.PathSeparator)+"...")
+	if err != nil {
+		return nil, err
+	}
+
+	funcDecl := func(e ast.Decl) bool { _, ok := e.(*ast.FuncDecl); return ok }
+
+	for _, pkg := range pkgs {
+		if len(pkg.Errors) > 0 {
+			return nil, t.joinErrors(pkg.Errors...)
+		}
+		for _, s := range pkg.Syntax {
+			if slices.ContainsFunc(s.Decls, funcDecl) {
+				if !slices.Contains(result, pkg.PkgPath) {
+					result = append(result, pkg.PkgPath)
+				}
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// has reports wheter the packages have tests.
+func (t thereAreTests) has(ctx context.Context) ([]string, error) {
+	stdout := new(bytes.Buffer)
+	cmd := t.os.newCmd(ctx,
+		t.workDir, stdout, nil,
+		"go", "test", "-json", "-vet=off", "-list=(^Test)|(^Fuzz)", "."+string(os.PathSeparator)+"...",
+	)
+
+	err := cmd.Run()
+	if _, isExitError := errors.AsType[*exec.ExitError](err); err != nil && !isExitError {
+		return nil, err
+	}
+
+	return t.decode(stdout)
+}
+
+// decode decodes r and returns the packages that have tests.
+func (t thereAreTests) decode(r io.Reader) ([]string, error) {
+	var pkgs []string
+
+	dec := jsontext.NewDecoder(r)
+	for {
+		var te testEvent
+		if err := json.UnmarshalDecode(dec, &te); err == io.EOF {
+			return pkgs, nil
+		} else if err != nil {
+			return pkgs, err
+		}
+
+		if t.isTest(te) {
+			if !slices.Contains(pkgs, te.Package) {
+				pkgs = append(pkgs, te.Package)
+			}
+		}
+		if t.isBuildFailure(te) {
+			return pkgs, errors.New("build fail")
+		}
+	}
+}
+
+// isTest reports whether the event represents a test listing.
+func (t thereAreTests) isTest(te testEvent) bool {
+	if te.Action != "output" || te.Package == "" {
+		return false
+	}
+	return strings.HasPrefix(te.Output, "Test") || strings.HasPrefix(te.Output, "Fuzz")
+}
+
+// isBuildFailure reports whether the event represents a build failure.
+func (t thereAreTests) isBuildFailure(te testEvent) bool {
+	return te.Action == "build-fail" && te.Test == "" && te.Package == ""
+}
+
+// joinErrors concatenates the error messages of the errors in errs, with a new line between
+// each message, and returns the error with it.
+func (t thereAreTests) joinErrors(errs ...packages.Error) error {
+	var messages []string
+
+	for _, err := range errs {
+		messages = append(messages, err.Error())
+	}
+
+	return errors.New(strings.Join(messages, "\n"))
+}
+
+// vet is a operation that executes "go vet" in each package.
+type vet struct {
+	workDir string
+	os      operatingSystem
+}
+
+func newVet(workDir string, opSys operatingSystem) operation {
+	return vet{workDir: workDir, os: opSys}
+}
+
+// run executes "go vet ./...".
+func (vp vet) run(ctx context.Context) (message string, err error) {
+	stderr := new(bytes.Buffer)
+	stderr.WriteString("\tlan: from go vet\n")
+
+	cmd := vp.os.newCmd(ctx, vp.workDir, nil, stderr, "go", "vet", "."+string(os.PathSeparator)+"...")
+	err = cmd.Run()
+	if _, isExitError := errors.AsType[*exec.ExitError](err); err != nil && !isExitError {
+		return "", fmt.Errorf("\tlan: from go vet\n%w", err)
+	} else if err != nil {
+		return strings.TrimRightFunc(stderr.String(), unicode.IsSpace), nil
+	}
+
+	return
+}
+
+// staticcheck is a operation that executes the staticcheck linter in the packages, if it is installed.
+type staticcheck struct {
+	workDir string
+	os      operatingSystem
+}
+
+// newStaticcheck creates a staticcheck.
+func newStaticcheck(workDir string, opSys operatingSystem) operation {
+	return staticcheck{workDir: workDir, os: opSys}
+}
+
+// run executes "staticcheck" and returns the message.
+// If the staticcheck is not installed then run returns the empty string and nil in err.
+// It verifies if staticcheck was installed with "go get -tool" or with "go install".
+// If staticcheck was installed with "go get -tool" then run executes "go tool staticcheck".
+// Otherwise, if installed with "go install" then run executes "staticcheck". If installed
+// with both methods then run executes executes "go tool staticcheck".
+func (sp staticcheck) run(ctx context.Context) (message string, err error) {
+	buf := new(bytes.Buffer)
+	buf.WriteString("\tlan: from staticcheck\n")
+
+	cmd, err := sp.command(ctx)
+	if err != nil {
+		return "", fmt.Errorf("\tlan: from staticcheck\n%w", err)
+	}
+
+	type result struct {
+		message   string
+		err       error
+		withTests bool
+	}
+
+	chResult := make(chan result)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		var r result
+		r.withTests = true
+		r.message, r.err = sp.withTests(ctx, cmd)
+		chResult <- r
+	})
+	wg.Go(func() {
+		var r result
+		r.message, r.err = sp.withoutTests(ctx, cmd)
+		chResult <- r
+	})
+
+	go func() {
+		wg.Wait()
+		close(chResult)
+	}()
+
+	results := make([]result, 2)
+	for r := range chResult {
+		if r.withTests {
+			results[0] = r
+		} else {
+			results[1] = r
+		}
+	}
+
+	for i := range 2 {
+		if results[i].err != nil {
+			return "", fmt.Errorf("\tlan: from staticcheck\n%w", results[i].err)
+		} else if results[i].message != "" {
+			// withTests has precedence, so if there are a function not used by the test and the non-test code
+			// then it wont be reported two times.
+			buf.WriteString(results[i].message)
+			return strings.TrimRightFunc(buf.String(), unicode.IsSpace), nil
+		}
+	}
+
+	return
+}
+
+// command determines what command to use, "go tool staticcheck" or "staticcheck".
+func (sp staticcheck) command(ctx context.Context) (cmd []string, err error) {
+	cmd, err = sp.installedWithGoTool(ctx)
+	if cmd != nil {
+		return
+	}
+
+	cmd, errSys := sp.installedInTheSystem()
+	err = cmp.Or(err, errSys)
+	return
+}
+
+func (sp staticcheck) installedWithGoTool(ctx context.Context) (cmd []string, err error) {
+	var stdout strings.Builder
+	goToolCmd := sp.os.newCmd(ctx, sp.workDir, &stdout, nil, "go", "tool")
+	if err = goToolCmd.Run(); err != nil {
+		return
+	}
+	for line := range strings.Lines(stdout.String()) {
+		if strings.TrimSpace(line) == "honnef.co/go/tools/cmd/staticcheck" {
+			return []string{"go", "tool", "staticcheck"}, nil
+		}
+	}
+
+	return
+}
+
+// maybe installed with "go install".
+func (sp staticcheck) installedInTheSystem() (cmd []string, err error) {
+	if _, err = exec.LookPath("staticcheck"); errors.Is(err, exec.ErrNotFound) {
+		return nil, nil
+	} else if err != nil {
+		return
+	}
+
+	return []string{"staticcheck"}, nil
+}
+
+// withTests executes staticcheck considering the tests.
+func (sp staticcheck) withTests(ctx context.Context, cmd []string) (message string, err error) {
+	var b strings.Builder
+	cmd = append(cmd, "."+string(os.PathSeparator)+"...")
+	execCmd := sp.os.newCmd(ctx, sp.workDir, &b, nil, cmd[0], cmd[1:]...)
+
+	err = execCmd.Run()
+	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
+		return b.String(), nil
+	}
+
+	return
+}
+
+// withoutTests executes "staticcheck -tests=false -checks=U1000" and returns the message.
+//
+// With the "-tests=false" parameter a function is not considered used if only tests call it.
+// I think that only the U1000 check is afected by "-tests=false".
+func (sp staticcheck) withoutTests(ctx context.Context, cmd []string) (message string, err error) {
+	var b strings.Builder
+	cmd = append(cmd, "-tests=false", "-checks=U1000", "."+string(os.PathSeparator)+"...")
+	execCmd := sp.os.newCmd(ctx, sp.workDir, &b, nil, cmd[0], cmd[1:]...)
+
+	err = execCmd.Run()
+	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
+		return b.String(), nil
+	}
+
+	return
+}
+
+// packageOperation is operates in only one packages.
+type packageOperation interface {
+	// run executes a operation and returns the message, without white space at end. If the result of the
+	// execution doesn't denies git then the empty string will be returned in message.
+	run(ctx context.Context, pkg string) (message string, err error)
 }
 
 // pkgpkgOpGroup executes package operations. The method wait returns the first failure, if any.
@@ -263,435 +586,6 @@ type pkgOpGroupOperationResult struct {
 	done    bool
 }
 
-// build is a operation that executes the build for each package.
-type build struct {
-	workDir string
-	os      operatingSystem
-}
-
-func newBuild(workDir string, opSys operatingSystem) operation {
-	return build{workDir: workDir, os: opSys}
-}
-
-// run builds the packages.
-func (b build) run(ctx context.Context, packages []string) (message string, err error) {
-	g := newPkgOpGroup()
-
-	for _, pkg := range packages {
-		bp := newBuildPkg(b.workDir, b.os)
-		g.executeGo(ctx, bp, pkg)
-	}
-
-	return g.wait()
-}
-
-// build is a operation that executes the build of a package.
-type buildPkg struct {
-	workDir string
-	os      operatingSystem
-}
-
-func newBuildPkg(workDir string, opSys operatingSystem) packageOperation {
-	return buildPkg{workDir: workDir, os: opSys}
-}
-
-// run builds the packages.
-func (b buildPkg) run(ctx context.Context, pkg string) (message string, err error) {
-	stdout := new(bytes.Buffer)
-
-	cmd := b.os.newCmd(ctx, b.workDir, stdout, nil,
-		"go", "test", "-c", "-json", "-vet=off", "-o="+os.DevNull, pkg)
-	err = cmd.Run()
-	if _, isExitError := errors.AsType[*exec.ExitError](err); err != nil && !isExitError {
-		return message, fmt.Errorf("\tlan: from building\n%w", err)
-	}
-
-	buildOk, err := b.result(stdout)
-
-	if err != nil {
-		return "", fmt.Errorf("\tlan: from building\n%w", err)
-	}
-
-	if !buildOk {
-		return "\tlan: from building\nbuild failed", nil
-	}
-
-	return
-}
-
-// result decodes r and reports whether the build was ok.
-func (t buildPkg) result(r io.Reader) (buildOk bool, err error) {
-	buildOk = true
-
-	dec := jsontext.NewDecoder(r)
-	for {
-		var te testEvent
-		if err = json.UnmarshalDecode(dec, &te); err == io.EOF {
-			return buildOk, nil
-		} else if err != nil {
-			return false, err
-		}
-		if te.Action == "build-fail" {
-			buildOk = false
-		}
-	}
-}
-
-// thereAreTests check if the packages need and have tests.
-type thereAreTests struct {
-	workDir string
-	os      operatingSystem
-}
-
-func newThereAreTests(workDir string, opSys operatingSystem) operation {
-	return thereAreTests{workDir: workDir, os: opSys}
-}
-
-// run checks if all packages that need tests have tests.
-func (t thereAreTests) run(ctx context.Context, packages []string) (message string, err error) {
-	g := newPkgOpGroup()
-
-	for _, pkg := range packages {
-		tp := newThereAreTestsPkg(t.workDir, t.os)
-		g.executeGo(ctx, tp, pkg)
-	}
-
-	return g.wait()
-}
-
-// thereAreTestsPkg check if a package need and have tests.
-type thereAreTestsPkg struct {
-	workDir string
-	os      operatingSystem
-}
-
-func newThereAreTestsPkg(workDir string, opSys operatingSystem) packageOperation {
-	return thereAreTestsPkg{workDir: workDir, os: opSys}
-}
-
-// run checks if the package need and have tests.
-func (t thereAreTestsPkg) run(ctx context.Context, pkg string) (message string, err error) {
-	need, err := t.need(ctx, pkg)
-	if err != nil {
-		return
-	}
-	has, err := t.has(ctx, pkg)
-	if err != nil {
-		return
-	}
-
-	if need && !has {
-		return fmt.Sprintf("\tlan: from checking if there are tests\n%s has no tests", pkg), nil
-	}
-
-	return "", nil
-
-}
-
-// need reports whether the package need tests.
-func (t thereAreTestsPkg) need(ctx context.Context, pkgPath string) (bool, error) {
-	// We dont support folders with multiple non-test packages.
-
-	cfg := &packages.Config{
-		Dir:     t.workDir,
-		Context: ctx,
-		Mode:    packages.NeedSyntax | packages.NeedFiles | packages.NeedName,
-	}
-	pkgs, err := packages.Load(cfg, pkgPath)
-	if err != nil {
-		return false, err
-	}
-
-	pkg := pkgs[0]
-
-	funcDecl := func(e ast.Decl) bool { _, ok := e.(*ast.FuncDecl); return ok }
-
-	if len(pkg.Errors) > 0 {
-		return false, t.joinErrors(pkg.Errors...)
-	}
-	for _, s := range pkg.Syntax {
-		if slices.ContainsFunc(s.Decls, funcDecl) {
-			return true, nil
-		}
-	}
-
-	return false, nil
-}
-
-// has reports wheter the package have tests.
-func (t thereAreTestsPkg) has(ctx context.Context, pkgPath string) (bool, error) {
-	stdout := new(bytes.Buffer)
-	cmd := t.os.newCmd(ctx,
-		t.workDir, stdout, nil,
-		"go", "test", "-json", "-vet=off", "-list=(^Test)|(^Fuzz)", pkgPath,
-	)
-
-	err := cmd.Run()
-	if _, isExitError := errors.AsType[*exec.ExitError](err); err != nil && !isExitError {
-		return false, err
-	}
-
-	return t.decode(stdout)
-}
-
-// decode decodes r and reports whether the package has or not has tests.
-func (t thereAreTestsPkg) decode(r io.Reader) (bool, error) {
-	dec := jsontext.NewDecoder(r)
-	for {
-		var te testEvent
-		if err := json.UnmarshalDecode(dec, &te); err == io.EOF {
-			return false, nil
-		} else if err != nil {
-			return false, err
-		}
-
-		if t.isTest(te) {
-			return true, nil
-		}
-		if t.isBuildFailure(te) {
-			return false, errors.New("build fail")
-		}
-	}
-}
-
-// isTest reports whether the event represents a test listing.
-func (t thereAreTestsPkg) isTest(te testEvent) bool {
-	if te.Action != "output" || te.Package == "" {
-		return false
-	}
-	return strings.HasPrefix(te.Output, "Test") || strings.HasPrefix(te.Output, "Fuzz")
-}
-
-// isBuildFailure reports whether the event represents a build failure.
-func (t thereAreTestsPkg) isBuildFailure(te testEvent) bool {
-	return te.Action == "build-fail" && te.Test == "" && te.Package == ""
-}
-
-// joinErrors concatenates the error messages of the errors in errs, with a new line between
-// each message, and returns the error with it.
-func (t thereAreTestsPkg) joinErrors(errs ...packages.Error) error {
-	var messages []string
-
-	for _, err := range errs {
-		messages = append(messages, err.Error())
-	}
-
-	return errors.New(strings.Join(messages, "\n"))
-}
-
-// vet is a operation that executes "go vet" in each package.
-type vet struct {
-	workDir string
-	os      operatingSystem
-}
-
-func newVet(workDir string, opSys operatingSystem) operation {
-	return vet{workDir: workDir, os: opSys}
-}
-
-// run executes "go vet" on the packages.
-func (v vet) run(ctx context.Context, packages []string) (message string, err error) {
-	g := newPkgOpGroup()
-
-	for _, pkg := range packages {
-		tp := newVetPkg(v.workDir, v.os)
-		g.executeGo(ctx, tp, pkg)
-	}
-
-	return g.wait()
-
-}
-
-// vet is a operation that executes "go vet" in the package.
-type vetPkg struct {
-	workDir string
-	os      operatingSystem
-}
-
-func newVetPkg(workDir string, opSys operatingSystem) packageOperation {
-	return vetPkg{workDir: workDir, os: opSys}
-}
-
-func (vp vetPkg) run(ctx context.Context, pkg string) (message string, err error) {
-	stderr := new(bytes.Buffer)
-	stderr.WriteString("\tlan: from go vet\n")
-
-	cmd := vp.os.newCmd(ctx, vp.workDir, nil, stderr, "go", "vet", pkg)
-	err = cmd.Run()
-	if _, isExitError := errors.AsType[*exec.ExitError](err); err != nil && !isExitError {
-		return "", fmt.Errorf("\tlan: from go vet\n%w", err)
-	} else if err != nil {
-		return strings.TrimRightFunc(stderr.String(), unicode.IsSpace), nil
-	}
-
-	return
-}
-
-// staticcheck is a operation that executes the staticcheck linter in the packages, if it is installed.
-type staticcheck struct {
-	workDir string
-	os      operatingSystem
-}
-
-// newStaticcheck creates a staticcheck.
-func newStaticcheck(workDir string, opSys operatingSystem) operation {
-	return staticcheck{workDir: workDir, os: opSys}
-}
-
-func (s staticcheck) run(ctx context.Context, packages []string) (message string, err error) {
-	g := newPkgOpGroup()
-
-	for _, pkg := range packages {
-		tp := newStaticcheckPkg(s.workDir, s.os)
-		g.executeGo(ctx, tp, pkg)
-	}
-
-	return g.wait()
-}
-
-// staticcheckPkg is a operation that executes the staticcheck linter in a package, if it is installed.
-type staticcheckPkg struct {
-	workDir string
-	os      operatingSystem
-}
-
-// newStaticcheck creates a staticcheck.
-func newStaticcheckPkg(workDir string, opSys operatingSystem) packageOperation {
-	return staticcheckPkg{workDir: workDir, os: opSys}
-}
-
-// run executes "staticcheck" and returns the message.
-// If the staticcheck is not installed then run returns the empty string and nil in err.
-// It verifies if staticcheck was installed with "go get -tool" or with "go install".
-// If staticcheck was installed with "go get -tool" then run executes "go tool staticcheck".
-// Otherwise, if installed with "go install" then run executes "staticcheck". If installed
-// with both methods then run executes executes "go tool staticcheck".
-func (sp staticcheckPkg) run(ctx context.Context, pkg string) (message string, err error) {
-	buf := new(bytes.Buffer)
-	buf.WriteString("\tlan: from staticcheck\n")
-
-	cmd, err := sp.command(ctx)
-	if err != nil {
-		return "", fmt.Errorf("\tlan: from staticcheck\n%w", err)
-	}
-
-	type result struct {
-		message   string
-		err       error
-		withTests bool
-	}
-
-	chResult := make(chan result)
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		var r result
-		r.withTests = true
-		r.message, r.err = sp.withTests(ctx, pkg, cmd)
-		chResult <- r
-	})
-	wg.Go(func() {
-		var r result
-		r.message, r.err = sp.withoutTests(ctx, pkg, cmd)
-		chResult <- r
-	})
-
-	go func() {
-		wg.Wait()
-		close(chResult)
-	}()
-
-	results := make([]result, 2)
-	for r := range chResult {
-		if r.withTests {
-			results[0] = r
-		} else {
-			results[1] = r
-		}
-	}
-
-	for i := range 2 {
-		if results[i].err != nil {
-			return "", fmt.Errorf("\tlan: from staticcheck\n%w", results[i].err)
-		} else if results[i].message != "" {
-			// withTests has precedence, so if there are a function not used by the test and the non-test code
-			// then it wont be reported two times.
-			buf.WriteString(results[i].message)
-			return strings.TrimRightFunc(buf.String(), unicode.IsSpace), nil
-		}
-	}
-
-	return
-}
-
-// command determines what command to use, "go tool staticcheck" or "staticcheck".
-func (sp staticcheckPkg) command(ctx context.Context) (cmd []string, err error) {
-	cmd, err = sp.installedWithGoTool(ctx)
-	if cmd != nil {
-		return
-	}
-
-	cmd, errSys := sp.installedInTheSystem()
-	err = cmp.Or(err, errSys)
-	return
-}
-
-func (sp staticcheckPkg) installedWithGoTool(ctx context.Context) (cmd []string, err error) {
-	var stdout strings.Builder
-	goToolCmd := sp.os.newCmd(ctx, sp.workDir, &stdout, nil, "go", "tool")
-	if err = goToolCmd.Run(); err != nil {
-		return
-	}
-	for line := range strings.Lines(stdout.String()) {
-		if strings.TrimSpace(line) == "honnef.co/go/tools/cmd/staticcheck" {
-			return []string{"go", "tool", "staticcheck"}, nil
-		}
-	}
-
-	return
-}
-
-// maybe installed with "go install".
-func (sp staticcheckPkg) installedInTheSystem() (cmd []string, err error) {
-	if _, err = exec.LookPath("staticcheck"); errors.Is(err, exec.ErrNotFound) {
-		return nil, nil
-	} else if err != nil {
-		return
-	}
-
-	return []string{"staticcheck"}, nil
-}
-
-// withTests executes staticcheck considering the tests.
-func (sp staticcheckPkg) withTests(ctx context.Context, pkg string, cmd []string) (message string, err error) {
-	var b strings.Builder
-	cmd = append(cmd, pkg)
-	execCmd := sp.os.newCmd(ctx, sp.workDir, &b, nil, cmd[0], cmd[1:]...)
-
-	err = execCmd.Run()
-	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
-		return b.String(), nil
-	}
-
-	return
-}
-
-// withoutTests executes "staticcheck -tests=false -checks=U1000" and returns the message.
-//
-// With the "-tests=false" parameter a function is not considered used if only tests call it.
-// I think that only the U1000 check is afected by "-tests=false".
-func (sp staticcheckPkg) withoutTests(ctx context.Context, pkg string, cmd []string) (message string, err error) {
-	var b strings.Builder
-	cmd = append(cmd, "-tests=false", "-checks=U1000", pkg)
-	execCmd := sp.os.newCmd(ctx, sp.workDir, &b, nil, cmd[0], cmd[1:]...)
-
-	err = execCmd.Run()
-	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
-		return b.String(), nil
-	}
-
-	return
-}
-
 // tests is a operation that executes the tests.
 type tests struct {
 	workDir               string
@@ -708,15 +602,41 @@ func newTests(timeoutForEachPackage time.Duration, workDir string, opSys operati
 	}
 }
 
-func (t tests) run(ctx context.Context, packages []string) (message string, err error) {
+func (t tests) run(ctx context.Context) (message string, err error) {
+	pkgs, err := t.listPackages(t.workDir, t.os)
+	if err != nil {
+		return "", fmt.Errorf("\tlan: from executing the tests\n%w", err)
+	}
+
 	g := newPkgOpGroup()
 
-	for _, pkg := range packages {
+	for _, pkg := range pkgs {
 		tp := newTestsPkg(t.timeoutForEachPackage, t.workDir, t.os)
 		g.executeGo(ctx, tp, pkg)
 	}
 
 	return g.wait()
+}
+
+func (t tests) listPackages(workDir string, opSys operatingSystem) (pkgs []string, err error) {
+	stdout := new(bytes.Buffer)
+	stderr := new(strings.Builder)
+	cmd := opSys.newCmd(context.Background(), workDir, stdout, stderr, "go", "list", "."+string(os.PathSeparator)+"...")
+	err = cmd.Run()
+	if _, isExitError := errors.AsType[*exec.ExitError](err); err != nil && !isExitError {
+		return
+	}
+	err = nil
+
+	if stderr.Len() > 0 {
+		return nil, errors.New(strings.TrimRightFunc(stderr.String(), unicode.IsSpace))
+	}
+
+	for line := range bytes.Lines(stdout.Bytes()) {
+		pkgs = append(pkgs, string(bytes.TrimSpace(line)))
+	}
+
+	return
 }
 
 // testEvent is a event generated by the test command.
@@ -816,7 +736,7 @@ func (tp testsPkg) toTestResult(te testEvent) testResult {
 	}
 
 	if te.Action == "output" && strings.HasPrefix(te.Output, "panic: test timed out after") {
-		return testResult{kind: testResultTimeout, pkg: te.Package, message: fmt.Sprintf("%s: %s", te.Package, te.Output)}
+		return testResult{kind: testResultTimeout, pkg: te.Package, message: fmt.Sprintf("%s: %s", te.Package, strings.TrimSpace(te.Output))}
 	}
 
 	if te.Action == "output" && coverageRe.MatchString(te.Output) {

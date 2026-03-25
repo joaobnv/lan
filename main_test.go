@@ -64,11 +64,6 @@ func TestCmdRunError(t *testing.T) {
 		return prevNewCmd(t.Context(), workDir, stdout, stderr, name, args...)
 	}
 
-	pkgs, err := listPackages(wd, opSys)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	t.Setenv("PATH", wd)
 
 	cases := []struct{ op operation }{
@@ -80,7 +75,7 @@ func TestCmdRunError(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(fmt.Sprintf("%T", c.op), func(t *testing.T) {
-			if _, err := c.op.run(t.Context(), pkgs); err == nil {
+			if _, err := c.op.run(t.Context()); err == nil {
 				t.Errorf("run did not return a error")
 			}
 		})
@@ -130,7 +125,7 @@ func TestOpGroupError(t *testing.T) {
 		done = append(done, make(chan struct{}))
 		msgs = append(msgs, "")
 		errs = append(errs, nil)
-		ops = append(ops, func(context.Context, []string) (string, error) { <-done[n]; return msgs[n], errs[n] })
+		ops = append(ops, func(context.Context) (string, error) { <-done[n]; return msgs[n], errs[n] })
 		numbers = append(numbers, n)
 	}
 
@@ -159,7 +154,7 @@ func TestOpGroupError(t *testing.T) {
 
 			eg := newOpGroup()
 			for n := range N {
-				eg.executeGo(t.Context(), ops[n], nil)
+				eg.executeGo(t.Context(), ops[n])
 			}
 
 			go func() {
@@ -202,7 +197,7 @@ func TestOpGroupMessages(t *testing.T) {
 		done = append(done, make(chan struct{}))
 		msgs = append(msgs, "")
 		errs = append(errs, nil)
-		ops = append(ops, func(context.Context, []string) (string, error) { <-done[n]; return msgs[n], errs[n] })
+		ops = append(ops, func(context.Context) (string, error) { <-done[n]; return msgs[n], errs[n] })
 		numbers = append(numbers, n)
 	}
 
@@ -231,7 +226,7 @@ func TestOpGroupMessages(t *testing.T) {
 
 			eg := newOpGroup()
 			for n := range N {
-				eg.executeGo(t.Context(), ops[n], nil)
+				eg.executeGo(t.Context(), ops[n])
 			}
 
 			go func() {
@@ -376,10 +371,10 @@ func TestPkgOpGroupMessages(t *testing.T) {
 	}
 }
 
-type op func(ctx context.Context, packages []string) (message string, err error)
+type op func(ctx context.Context) (message string, err error)
 
-func (o op) run(ctx context.Context, packages []string) (message string, err error) {
-	return o(ctx, packages)
+func (o op) run(ctx context.Context) (message string, err error) {
+	return o(ctx)
 }
 
 type pkgOp func(ctx context.Context, pkg string) (message string, err error)
@@ -441,13 +436,8 @@ func TestCmdNoJson_build(t *testing.T) {
 		}
 	})
 
-	pkgs, err := listPackages(wd, newOperatingSystem())
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	op := newBuild(wd, newOperatingSystem())
-	if _, err := op.run(t.Context(), pkgs); err == nil {
+	if _, err := op.run(t.Context()); err == nil {
 		t.Error("err = nil")
 	}
 }
@@ -468,18 +458,13 @@ func TestBuildCmdError(t *testing.T) {
 		{runError: io.EOF},
 	}
 
-	pkgs, err := listPackages(wd, newOperatingSystem())
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	for _, c := range cases {
 		b := newBuild(wd, newOperatingSystem()).(build)
 		b.os.newCmd = func(ctx context.Context, worDir string, stdout, stderr io.Writer, name string, args ...string) command {
 			return testCmd(func() error { io.WriteString(stdout, c.output); return c.runError })
 		}
 
-		if _, err = b.run(t.Context(), pkgs); err == nil {
+		if _, err = b.run(t.Context()); err == nil {
 			t.Error("err == nil")
 		}
 	}
@@ -490,14 +475,9 @@ func TestBuildCmdError(t *testing.T) {
 func TestThereAreTestsPackageLoadError(t *testing.T) {
 	t.Parallel()
 
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	op := newThereAreTests(filepath.Join(wd, "testdata", "fusptop"), newOperatingSystem()).(thereAreTests)
 	// I think \x00 is not allowed in Linux and Windows.
-	if _, err := op.run(t.Context(), []string{"\x00<\\/>"}); err == nil {
+	op := newThereAreTests("\x00<\\/>", newOperatingSystem()).(thereAreTests)
+	if _, err := op.run(t.Context()); err == nil {
 		t.Errorf("err = nil, want an error explaining that the path is invalid")
 	}
 }
@@ -515,41 +495,8 @@ func TestThereAreTestsRunError(t *testing.T) {
 		return testCmd(func() error { return io.EOF })
 	}
 
-	pkgs, err := listPackages(wd, newOperatingSystem())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err = b.run(t.Context(), pkgs); err == nil {
+	if _, err = b.run(t.Context()); err == nil {
 		t.Error("err == nil")
-	}
-}
-
-func TestThereAreTestsPkgBuildError(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	wd = filepath.Join(wd, "testdata", "se")
-	t.Chdir(wd)
-
-	op := newThereAreTestsPkg(wd, newOperatingSystem()).(thereAreTestsPkg)
-
-	pkgs, err := listPackages(wd, newOperatingSystem())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err = op.run(t.Context(), pkgs[0]); err == nil {
-		t.Error("run: err == nil")
-	}
-
-	if _, err = op.need(t.Context(), pkgs[0]); err == nil {
-		t.Error("need: err == nil")
-	}
-
-	if _, err = op.has(t.Context(), pkgs[0]); err == nil {
-		t.Error("has: err == nil")
 	}
 }
 
@@ -569,12 +516,7 @@ func TestCreateTempError(t *testing.T) {
 	}
 	op.os.remove = nil
 
-	pkgs, err := listPackages(wd, newOperatingSystem())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := op.run(t.Context(), pkgs); err == nil {
+	if _, err := op.run(t.Context()); err == nil {
 		t.Errorf("err = nil")
 	} else if err.Error() != errorMsg {
 		t.Errorf("err.Error() = %q, want %q", err.Error(), errorMsg)
@@ -613,14 +555,8 @@ func TestCmdNoJson_tests(t *testing.T) {
 			panic(err)
 		}
 	})
-
-	pkgs, err := listPackages(wd, newOperatingSystem())
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	op := newTests(1*time.Millisecond, wd, newOperatingSystem())
-	if _, err := op.run(t.Context(), pkgs); err == nil {
+	if _, err := op.run(t.Context()); err == nil {
 		t.Error("err = nil")
 	}
 }
@@ -659,18 +595,8 @@ func TestCmdNoJson_thereAreTests(t *testing.T) {
 		}
 	})
 
-	pkgs, err := listPackages(wd, newOperatingSystem())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	op := newThereAreTests(wd, newOperatingSystem())
-	if _, err = op.run(t.Context(), pkgs); err == nil {
-		t.Error("err == nil")
-	}
-
-	pkgOp := newThereAreTestsPkg(wd, newOperatingSystem()).(thereAreTestsPkg)
-	if _, err = pkgOp.has(t.Context(), "main"); err == nil {
+	pkgOp := newThereAreTests(wd, newOperatingSystem()).(thereAreTests)
+	if _, err = pkgOp.has(t.Context()); err == nil {
 		t.Error("err == nil")
 	}
 }
@@ -691,12 +617,7 @@ func TestCoverProfileOpenError_tests(t *testing.T) {
 		return nil, errors.New(errMsg)
 	}
 
-	pkgs, err := listPackages(wd, newOperatingSystem())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err = op.run(t.Context(), pkgs); err == nil {
+	if _, err = op.run(t.Context()); err == nil {
 		t.Error("err = nil")
 	} else if err.Error() != errMsg {
 		t.Errorf("err.Error() = %q, want %q", err.Error(), errMsg)
@@ -719,12 +640,7 @@ func TestScannerError_tests(t *testing.T) {
 		return io.NopCloser(iotest.ErrReader(errors.New(errMsg))), nil
 	}
 
-	pkgs, err := listPackages(wd, newOperatingSystem())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := op.run(t.Context(), pkgs); err == nil {
+	if _, err := op.run(t.Context()); err == nil {
 		t.Error("err = nil")
 	} else if err.Error() != errMsg {
 		t.Errorf("err.Error() = %q, want %q", err.Error(), errMsg)
@@ -742,7 +658,7 @@ func TestStaticcheckNotFoundInTheSystem(t *testing.T) {
 
 	t.Setenv("PATH", wd)
 
-	op := newStaticcheckPkg(filepath.Join(wd, "testdata", "fusptop"), newOperatingSystem()).(staticcheckPkg)
+	op := newStaticcheck(filepath.Join(wd, "testdata", "fusptop"), newOperatingSystem()).(staticcheck)
 	if cmd, err := op.installedInTheSystem(); cmd != nil || err != nil {
 		t.Errorf("cmd = %v and err == %q, want cmd = <nil> and error = <nil>", cmd, err)
 	}
@@ -768,7 +684,7 @@ func TestStaticcheckLookPathError(t *testing.T) {
 	// return ErrDot.
 	t.Setenv("PATH", "."+string(os.PathListSeparator)+path.Join(wd, "testdata"))
 
-	op := newStaticcheckPkg(filepath.Join(wd, "testdata", "staticcheckcmd"), newOperatingSystem()).(staticcheckPkg)
+	op := newStaticcheck(filepath.Join(wd, "testdata", "staticcheckcmd"), newOperatingSystem()).(staticcheck)
 	if _, err := op.installedInTheSystem(); !errors.Is(err, exec.ErrDot) {
 		t.Errorf("want err = exec.ErrDot, found %v", err)
 	}
@@ -783,17 +699,12 @@ func TestStaticcheckCommandError(t *testing.T) {
 	}
 	dir = filepath.Join(dir, "testdata", "fusptop")
 
-	pkgs, err := listPackages(dir, newOperatingSystem())
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	t.Chdir(filepath.Join("testdata", "fusptop"))
 	t.Setenv("PATH", filepath.Join(dir, "testdata", "testfail"))
 
 	op := newStaticcheck(dir, newOperatingSystem())
 
-	if _, err := op.run(t.Context(), pkgs); err == nil {
+	if _, err := op.run(t.Context()); err == nil {
 		t.Error("want err != nil, found nil")
 	}
 }
@@ -819,12 +730,7 @@ func TestStaticcheckError(t *testing.T) {
 		return testCmd(func() error { return errors.New(errorMsg) })
 	}
 
-	pkgs, err := listPackages(wd, newOperatingSystem())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := op.run(t.Context(), pkgs); err == nil {
+	if _, err := op.run(t.Context()); err == nil {
 		t.Errorf("err == nil")
 	} else if err.Error() != "\tlan: from staticcheck\n"+errorMsg {
 		t.Errorf("want error.Error() == %s, got %s", errorMsg, err.Error())

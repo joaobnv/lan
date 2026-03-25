@@ -139,7 +139,7 @@ func unmarshalDir(path string) (d *dir, err error) {
 	}
 
 	fileNames := []string{
-		"building.txt", "cover_profile.txt", "error.txt", "staticcheck.txt",
+		"building.txt", "cover_profile.txt", "staticcheck.txt",
 		"tests.txt", "there_are_tests.txt", "vet.txt",
 	}
 
@@ -165,6 +165,9 @@ func (d *dir) testRun(t *testing.T) {
 	t.Parallel()
 
 	denyGit, message := run(runConfig{workDir: d.path, os: newOperatingSystem(), testTimeout: d.testTimeout()})
+	if strings.TrimRightFunc(message, unicode.IsSpace) != message {
+		t.Errorf("whitespace at end\n%q", message)
+	}
 	if err := d.check(denyGit, message); err != nil {
 		t.Error(err)
 	}
@@ -350,20 +353,14 @@ func (f *file) unmarshallOptions(line []byte) error {
 func (f *file) testOp(t *testing.T) {
 	t.Parallel()
 
-	pkgs, err := listPackages(f.dirPath, newOperatingSystem())
-	if err != nil {
-		message := strings.TrimRightFunc(err.Error(), unicode.IsSpace)
-		if err = f.check(message); err != nil {
-			t.Error(err)
-		}
-		return
-	}
-
-	message, err := f.op().run(t.Context(), pkgs)
+	message, err := f.op().run(t.Context())
 	if err != nil {
 		message = strings.TrimRightFunc(err.Error(), unicode.IsSpace)
 	}
 
+	if strings.TrimRightFunc(message, unicode.IsSpace) != message {
+		t.Errorf("whitespace at end\n%q", message)
+	}
 	if err = f.check(message); err != nil {
 		t.Error(err)
 	}
@@ -413,7 +410,10 @@ func (f *file) check(message string) error {
 	}
 
 	body := gotLines[1:]
-	return f.checkRegexps(body)
+	if err := f.checkRegexps(body); err != nil {
+		return f.createError(err.Error(), gotLines)
+	}
+	return nil
 }
 
 func (f *file) createError(msg string, gotLines []string) error {
