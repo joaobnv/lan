@@ -1,9 +1,0 @@
-	lan: from checking if there are tests
-tfntf has no tests
-	lan: from go vet (not all, unordered)
-.* append with no values$
-.* format %d has arg a of wrong type \[\]string$
-.* Testlc has malformed name: first letter after 'Test' must not be lowercase$
-.* Fuzzlc has malformed name: first letter after 'Fuzz' must not be lowercase$
-	lan: from staticcheck
-.* \(SA4021\)$

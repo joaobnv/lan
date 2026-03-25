@@ -1,2 +1,0 @@
-	lan: from checking if there are tests (unordered)
-ps/dtf has no tests

@@ -1,0 +1,2 @@
+t\.go:11:6: func reg is unused \(U1000\)
+t\.go:17:6: x = append\(y\) is equivalent to x = y \(SA4021\)

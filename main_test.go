@@ -86,7 +86,7 @@ func TestCmdRunError(t *testing.T) {
 		})
 	}
 
-	denyGit, message := run(wd, opSys)
+	denyGit, message := run(runConfig{workDir: wd, os: opSys})
 	if !denyGit || message == "" {
 		t.Errorf("not deny git or message is empty")
 	}
@@ -110,7 +110,7 @@ func TestRunOpError(t *testing.T) {
 		return prevNewCmd(t.Context(), workDir, stdout, stderr, name, args...)
 	}
 
-	denyGit, message := run(wd, opSys)
+	denyGit, message := run(runConfig{workDir: wd, os: opSys})
 	if !denyGit || message == "" {
 		t.Errorf("not deny git or message is empty")
 	}

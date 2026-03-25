@@ -36,7 +36,7 @@ func main() {
 		defaultOS.exit(1)
 		return
 	}
-	denyGit, message := run(workDir, defaultOS)
+	denyGit, message := run(runConfig{workDir: workDir, os: defaultOS})
 	if denyGit {
 		fmt.Fprint(defaultOS.stdout, message)
 		// I think that showing the version helps the user because Lan does not receive command line parameters
@@ -46,23 +46,31 @@ func main() {
 	}
 }
 
+type runConfig struct {
+	workDir     string
+	os          operatingSystem
+	testTimeout time.Duration
+}
+
 // run executes the operations.
-func run(workDir string, opSys operatingSystem) (denyGit bool, message string) {
-	pkgs, err := listPackages(workDir, opSys)
+func run(cfg runConfig) (denyGit bool, message string) {
+	pkgs, err := listPackages(cfg.workDir, cfg.os)
 	if err != nil {
 		return true, strings.TrimRightFunc(err.Error(), unicode.IsSpace)
+	}
+
+	if cfg.testTimeout == 0 {
+		cfg.testTimeout = 120 * time.Second
 	}
 
 	og := newOpGroup()
 	ctx := context.Background()
 
-	const testTimeout = 120 * time.Second
-
-	og.executeGo(ctx, newBuild(workDir, opSys), pkgs)
-	og.executeGo(ctx, newThereAreTests(workDir, opSys), pkgs)
-	og.executeGo(ctx, newVet(workDir, opSys), pkgs)
-	og.executeGo(ctx, newStaticcheck(workDir, opSys), pkgs)
-	og.executeGo(ctx, newTests(testTimeout, workDir, opSys), pkgs)
+	og.executeGo(ctx, newBuild(cfg.workDir, cfg.os), pkgs)
+	og.executeGo(ctx, newThereAreTests(cfg.workDir, cfg.os), pkgs)
+	og.executeGo(ctx, newVet(cfg.workDir, cfg.os), pkgs)
+	og.executeGo(ctx, newStaticcheck(cfg.workDir, cfg.os), pkgs)
+	og.executeGo(ctx, newTests(cfg.testTimeout, cfg.workDir, cfg.os), pkgs)
 
 	message, err = og.wait()
 	if err != nil {
@@ -859,6 +867,7 @@ var defaultOS = newOperatingSystem()
 
 // opSystem is for allowing the tests to change the behavior of the packages os and exec.
 type operatingSystem struct {
+	pathSeparator rune
 	// stdout is for os.Stdout.
 	stdout io.Writer
 	// exit is for os.Exit.
@@ -877,10 +886,11 @@ type operatingSystem struct {
 
 func newOperatingSystem() operatingSystem {
 	return operatingSystem{
-		stdout:     os.Stdout,
-		exit:       os.Exit,
-		createTemp: os.CreateTemp,
-		remove:     os.Remove,
+		pathSeparator: os.PathSeparator,
+		stdout:        os.Stdout,
+		exit:          os.Exit,
+		createTemp:    os.CreateTemp,
+		remove:        os.Remove,
 		open: func(name string) (io.ReadCloser, error) {
 			return os.Open(name)
 		},

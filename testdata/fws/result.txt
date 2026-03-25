@@ -1,6 +1,0 @@
-	lan: from building
-build failed
-	lan: from executing the tests
-build failed
-	lan: from staticcheck (unordered, not all)
-.*

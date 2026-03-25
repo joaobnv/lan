@@ -1,0 +1,3 @@
+(unordered,some regexp)
+ps/f: FuzzSub/seed#0 failed
+ps/t: test coverage is not 100\.0%

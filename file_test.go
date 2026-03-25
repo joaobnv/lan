@@ -3,312 +3,508 @@ package main
 import (
 	"bytes"
 	"errors"
-	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
+	"text/tabwriter"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
-var resultFilesToTest *string
-
-func init() {
-	resultFilesToTest = flag.String("pft", `ntf, tfntf, sptnt, t, futo, pt, tpt, sne,
-		ps, tws, fws, oif, fusptop, se, pmntp, f`, "the packages, in testdata, to test")
-}
-
-func TestResultMain(t *testing.T) {
+func TestDirsMainPT(t *testing.T) {
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cases := []string{
-		"ntf", "fusptop",
+	dirPath := filepath.Join(wd, "testdata", "pt")
+
+	d, err := unmarshalDir(dirPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, dir := range cases {
-		t.Run(dir, func(t *testing.T) {
-			t.Chdir(filepath.Join("testdata", dir))
 
-			defaultOS.stdout = new(strings.Builder)
-			var exitCode int
-			defaultOS.exit = func(code int) {
-				exitCode = code
-			}
+	t.Chdir(dirPath)
+	defaultOS.stdout = &bytes.Buffer{}
+	t.Cleanup(func() { defaultOS.stdout = os.Stdout })
+	var exitCode int
+	defaultOS.exit = func(code int) { exitCode = code }
+	t.Cleanup(func() { defaultOS.exit = os.Exit })
 
-			main()
+	main()
 
-			denyGit := exitCode != 0
-			message := defaultOS.stdout.(*strings.Builder).String()
+	denyGit := exitCode != 0
+	message := defaultOS.stdout.(*bytes.Buffer).String()
 
-			expected, err := os.ReadFile(filepath.Join(wd, "testdata", dir, "result.txt"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			res := checkResults(denyGit, string(expected), message)
-			if res != "" {
-				t.Error(res)
-			}
-		})
+	message = strings.TrimSuffix(message, "\tlan version: "+version)
+	message = strings.TrimRightFunc(message, unicode.IsSpace)
+
+	if err := d.check(denyGit, message); err != nil {
+		t.Error(err)
 	}
 }
 
-func TestResults(t *testing.T) {
+func TestDirsMainSE(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirPath := filepath.Join(wd, "testdata", "se")
+
+	d, err := unmarshalDir(dirPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(dirPath)
+	defaultOS.stdout = &bytes.Buffer{}
+	t.Cleanup(func() { defaultOS.stdout = os.Stdout })
+	var exitCode int
+	defaultOS.exit = func(code int) { exitCode = code }
+	t.Cleanup(func() { defaultOS.exit = os.Exit })
+
+	main()
+
+	denyGit := exitCode != 0
+	message := defaultOS.stdout.(*bytes.Buffer).String()
+
+	message = strings.TrimSuffix(message, "\tlan version: "+version)
+	message = strings.TrimRightFunc(message, unicode.IsSpace)
+
+	if err := d.check(denyGit, message); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestDirs(t *testing.T) {
+	t.Parallel()
+
+	for _, dirPath := range dirsForTest(t) {
+		d, err := unmarshalDir(dirPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		t.Run(filepath.Base(d.path), d.testRun)
+		t.Run(filepath.Base(d.path)+"/op", d.testOperations)
+	}
+}
+
+func dirsForTest(t *testing.T) (result []string) {
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	var cases []string
-	for pkg := range strings.SplitSeq(*resultFilesToTest, ",") {
-		cases = append(cases, strings.TrimSpace(pkg))
-	}
-
-	for _, dir := range cases {
-		t.Run(dir, func(t *testing.T) {
-			t.Parallel()
-			denyGit, message := run(filepath.Join(wd, "testdata", dir), newOperatingSystem())
-
-			expected, err := os.ReadFile(filepath.Join(wd, "testdata", dir, "result.txt"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			res := checkResults(denyGit, string(expected), message)
-			if res != "" {
-				t.Error(res)
-			}
-		})
-	}
-}
-
-func TestTests(t *testing.T) {
-	wd, err := os.Getwd()
+	testdataFS := os.DirFS(filepath.Join(wd, "testdata"))
+	dirs, err := fs.ReadDir(testdataFS, ".")
 	if err != nil {
 		t.Fatal(err)
 	}
-	cases := []string{"to", "se"}
-	for _, dir := range cases {
-		t.Run(dir, func(t *testing.T) {
-			t.Parallel()
-			testsFilePath := filepath.Join(wd, "testdata", dir, "tests.txt")
-			if !fileExists(testsFilePath) {
-				return
-			}
 
-			data, err := os.ReadFile(testsFilePath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			lines := bytes.Split(data, []byte("\n"))
-			timeout := time.Duration(-1)
-			var remove int
-			for i := range lines {
-				if bytes.HasPrefix(lines[i], []byte("timeout")) {
-					_, d, ok := bytes.Cut(lines[i], []byte("="))
-					if !ok {
-						t.Fatalf("syntax error: missing '=' in %q", string(bytes.TrimSpace(lines[i])))
-					}
-					to, err := time.ParseDuration(string(bytes.TrimSpace(d)))
-					if err != nil {
-						t.Fatalf("syntax error: %s", err)
-					}
-					if timeout != -1 {
-						t.Fatal("syntax error: timeout redeclared")
-					}
-					timeout = to
-					remove = i + 1
-				} else if bytes.HasPrefix(lines[i], []byte("\tlan: ")) {
-					break
-				}
-			}
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
 
-			expected := bytes.Join(lines[remove:], []byte("\n"))
+		subDirs, err := fs.ReadDir(testdataFS, d.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
 
-			if timeout == -1 {
-				timeout = 30 * time.Second
-			}
-
-			wd := filepath.Join(wd, "testdata", dir)
-			op := newTests(timeout, wd, newOperatingSystem())
-			pkgs, err := listPackages(wd, newOperatingSystem())
-			if err != nil {
-				t.Fatal(err)
-			}
-			message, err := op.run(t.Context(), pkgs)
-			denyGit := message != "" || err != nil
-			if err != nil {
-				message = strings.TrimRightFunc(err.Error(), unicode.IsSpace)
-			}
-
-			res := checkResults(denyGit, string(expected), message)
-			if res != "" {
-				t.Error(res)
-			}
-		})
+		if slices.ContainsFunc(subDirs, func(e fs.DirEntry) bool { return e.Name() == "res" }) {
+			result = append(result, filepath.Join(wd, "testdata", d.Name()))
+		}
 	}
+
+	return
+}
+
+type dir struct {
+	path          string
+	fileForPrefix map[string]*file
+	fileForName   map[string]*file
+}
+
+func unmarshalDir(path string) (d *dir, err error) {
+	d = &dir{
+		path:          path,
+		fileForPrefix: map[string]*file{},
+		fileForName:   map[string]*file{},
+	}
+
+	fileNames := []string{
+		"building.txt", "cover_profile.txt", "error.txt", "staticcheck.txt",
+		"tests.txt", "there_are_tests.txt", "vet.txt",
+	}
+
+	for _, fileName := range fileNames {
+		filePath := filepath.Join(path, "res", fileName)
+		if !fileExists(filePath) {
+			continue
+		}
+
+		f, err := unmarshalFile(path, fileName)
+		if err != nil {
+			return nil, err
+		}
+
+		d.fileForPrefix[f.head] = f
+		d.fileForName[fileName] = f
+	}
+
+	return
+}
+
+func (d *dir) testRun(t *testing.T) {
+	t.Parallel()
+
+	denyGit, message := run(runConfig{workDir: d.path, os: newOperatingSystem(), testTimeout: d.testTimeout()})
+	if err := d.check(denyGit, message); err != nil {
+		t.Error(err)
+	}
+}
+
+func (d *dir) check(denyGit bool, message string) error {
+	wantDenyGit := d.wantDenyGit()
+	if !denyGit {
+		if wantDenyGit {
+			return fmt.Errorf("deny git == %v, want %v", denyGit, wantDenyGit)
+		}
+		return nil
+	}
+
+	ind := strings.IndexRune(message, '\n')
+	if ind == -1 {
+		return fmt.Errorf("unexpected %q", message)
+	}
+
+	prefix := strings.TrimSpace(message[:ind])
+	f := d.fileForPrefix[prefix]
+	if f == nil {
+		return fmt.Errorf("unknown prefix: %q\n%s", prefix, message)
+	}
+
+	return f.check(message)
+}
+
+func (d *dir) testOperations(t *testing.T) {
+	t.Parallel()
+
+	for _, f := range d.fileForName {
+		testName, _, _ := strings.Cut(f.fileName, ".")
+		t.Run(testName, f.testOp)
+	}
+}
+
+func (d *dir) wantDenyGit() bool {
+	for _, f := range d.fileForName {
+		if len(f.regs) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *dir) testTimeout() (dur time.Duration) {
+	f := d.fileForName["tests.txt"]
+	if f != nil && f.testTimeout != dur {
+		return f.testTimeout
+	}
+
+	f = d.fileForName["cover_profile.txt"]
+	if f != nil && f.testTimeout != dur {
+		return f.testTimeout
+	}
+
+	return
+}
+
+type file struct {
+	dirPath  string
+	fileName string
+
+	head             string
+	lines            []string
+	regs             []*regexp.Regexp
+	all              bool
+	ordered          bool
+	regexpQuantifier string
+	testTimeout      time.Duration
+}
+
+func unmarshalFile(dirPath, fileName string) (f *file, err error) {
+	filePath := filepath.Join(dirPath, "res", fileName)
+	if !fileExists(filePath) {
+		return nil, nil
+	}
+
+	f = new(file)
+	f.dirPath = dirPath
+	f.fileName = fileName
+
+	if err = f.setHead(fileName); err != nil {
+		return
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	lines := slices.Collect(bytes.Lines(data))
+	if len(lines) == 0 {
+		return
+	}
+
+	trimmed := bytes.TrimSpace(lines[0])
+	if bytes.HasPrefix(trimmed, []byte("(")) && bytes.HasSuffix(trimmed, []byte(")")) {
+		if err = f.unmarshallOptions(trimmed); err != nil {
+			return
+		}
+	} else {
+		f.lines = append(f.lines, string(bytes.TrimRight(lines[0], "\r\t\n")))
+	}
+
+	for _, line := range lines[1:] {
+		f.lines = append(f.lines, string(bytes.TrimRight(line, "\r\t\n")))
+	}
+
+	for _, line := range f.lines {
+		reg, err := regexp.Compile(line)
+		if err != nil {
+			return nil, err
+		}
+
+		f.regs = append(f.regs, reg)
+	}
+
+	return
+}
+
+func (f *file) setHead(fileName string) error {
+	switch fileName {
+	case "building.txt":
+		f.head = "lan: from building"
+	case "error.txt":
+		f.head = "lan: error"
+	case "cover_profile.txt":
+		f.head = "lan: from cover profile"
+	case "staticcheck.txt":
+		f.head = "lan: from staticcheck"
+	case "tests.txt":
+		f.head = "lan: from executing the tests"
+	case "there_are_tests.txt":
+		f.head = "lan: from checking if there are tests"
+	case "vet.txt":
+		f.head = "lan: from go vet"
+	default:
+		return fmt.Errorf("unknown file: %s", fileName)
+	}
+	return nil
+}
+
+func (f *file) unmarshallOptions(line []byte) error {
+	line = line[utf8.RuneLen('(') : len(line)-utf8.RuneLen(')')]
+	if len(line) == 0 {
+		return nil
+	}
+
+	f.all = true
+	f.ordered = true
+	f.regexpQuantifier = "all"
+
+	notAll := []byte("not all")
+	unordered := []byte("unordered")
+	someRegexp := []byte("some regexp")
+
+	options := bytes.Split(line, []byte(","))
+	for i := range options {
+		option := bytes.TrimSpace(options[i])
+		if bytes.Equal(option, notAll) {
+			f.all = false
+		} else if bytes.Equal(option, unordered) {
+			f.ordered = false
+		} else if bytes.Equal(option, someRegexp) {
+			f.regexpQuantifier = "exists"
+		} else if bytes.HasPrefix(option, []byte("timeout=")) {
+			_, d, _ := bytes.Cut(option, []byte("="))
+			timeout, err := time.ParseDuration(string(d))
+			if err != nil {
+				return fmt.Errorf("%s: %w", string(option), err)
+			}
+			f.testTimeout = timeout
+		} else {
+			return fmt.Errorf("unkonwn option %q, near %q", string(option), string(line))
+		}
+	}
+
+	return nil
+}
+
+func (f *file) testOp(t *testing.T) {
+	t.Parallel()
+
+	pkgs, err := listPackages(f.dirPath, newOperatingSystem())
+	if err != nil {
+		message := strings.TrimRightFunc(err.Error(), unicode.IsSpace)
+		if err = f.check(message); err != nil {
+			t.Error(err)
+		}
+		return
+	}
+
+	message, err := f.op().run(t.Context(), pkgs)
+	if err != nil {
+		message = strings.TrimRightFunc(err.Error(), unicode.IsSpace)
+	}
+
+	if err = f.check(message); err != nil {
+		t.Error(err)
+	}
+}
+
+func (f *file) op() operation {
+	switch f.fileName {
+	case "building.txt":
+		return newBuild(f.dirPath, newOperatingSystem())
+	case "there_are_tests.txt":
+		return newThereAreTests(f.dirPath, newOperatingSystem())
+	case "vet.txt":
+		return newVet(f.dirPath, newOperatingSystem())
+	case "staticcheck.txt":
+		return newStaticcheck(f.dirPath, newOperatingSystem())
+	case "tests.txt":
+		return newTests(f.testTimeout, f.dirPath, newOperatingSystem())
+	case "cover_profile.txt":
+		return newTests(f.testTimeout, f.dirPath, newOperatingSystem())
+	default:
+		panic(fmt.Errorf("unknown file: %s", f.fileName))
+	}
+}
+
+func (f *file) check(message string) error {
+	gotLines := slices.Collect(strings.Lines(message))
+	if len(gotLines) == 0 {
+		if len(f.regs) == 0 {
+			return nil
+		}
+		return f.createError("expecting at least 1 line", gotLines)
+	}
+
+	if strings.TrimSpace(gotLines[0]) != f.head {
+		return nil
+	}
+
+	if len(f.regs) == 0 {
+		if len(gotLines) > 0 {
+			return f.createError("expecting 0 lines", gotLines)
+		}
+		return nil
+	}
+
+	if len(gotLines) == 1 {
+		return f.createError("expecting at least 2 lines", gotLines)
+	}
+
+	body := gotLines[1:]
+	return f.checkRegexps(body)
+}
+
+func (f *file) createError(msg string, gotLines []string) error {
+	expected := []string{"\t" + f.head}
+	expected = append(expected, f.lines...)
+
+	b := new(bytes.Buffer)
+	b.WriteString(msg + "\n")
+	f.writeExpectedAndGot(b, expected, gotLines)
+
+	return errors.New(b.String())
+}
+
+func (f *file) checkRegexps(bodyLines []string) error {
+	var regexpsMatched []int
+	var linesMatched []int
+
+	for regIndex, reg := range f.regs {
+		if slices.Contains(regexpsMatched, regIndex) {
+			continue
+		}
+		for lineIndex, line := range bodyLines {
+			if slices.Contains(linesMatched, lineIndex) {
+				continue
+			}
+			line = strings.TrimSpace(line)
+			if reg.MatchString(line) {
+				regexpsMatched = append(regexpsMatched, regIndex)
+				linesMatched = append(linesMatched, lineIndex)
+				break
+			}
+		}
+	}
+
+	ordered := slices.IsSorted(linesMatched)
+	allLines := len(linesMatched) == len(bodyLines)
+	allRegexps := len(regexpsMatched) == len(f.regs)
+	someRegexp := len(regexpsMatched) > 0
+
+	var msgs []string
+	if f.ordered && !ordered {
+		msgs = append(msgs, "not ordered")
+	}
+	if f.all && !allLines {
+		msgs = append(msgs, "not all lines")
+	}
+	if f.regexpQuantifier == "all" && !allRegexps {
+		msgs = append(msgs, "not all regexps")
+	}
+	if f.regexpQuantifier == "exists" && !someRegexp {
+		msgs = append(msgs, "no regexp matched")
+	}
+	if len(msgs) > 0 {
+		return errors.New(strings.Join(msgs, ", "))
+	}
+
+	return nil
+}
+
+func (f *file) writeExpectedAndGot(b *bytes.Buffer, expected, got []string) {
+	tw := tabwriter.NewWriter(b, 10, 2, 1, ' ', 0)
+
+	toShow := func(line string) string {
+		line = strings.TrimRight(line, "\t\r\n")
+		return strings.ReplaceAll(line, "\t", strings.Repeat(" ", 4))
+	}
+
+	for i := range min(len(expected), len(got)) {
+		expectedLine := toShow(expected[i])
+		gotLine := toShow(got[i])
+		fmt.Fprintf(tw, "%s\t%s\n", expectedLine, gotLine)
+	}
+
+	if len(expected) > len(got) {
+		for i := len(got); i < len(expected); i++ {
+			expectedLine := toShow(expected[i])
+			fmt.Fprintf(tw, "%s\t\n", expectedLine)
+		}
+	}
+	if len(got) > len(expected) {
+		for i := len(expected); i < len(got); i++ {
+			gotLine := toShow(got[i])
+			fmt.Fprintf(tw, "\t%s\n", gotLine)
+		}
+	}
+
+	tw.Flush()
 }
 
 // fileExists reports whether a file exists.
 func fileExists(name string) bool {
 	_, err := os.Stat(name)
 	return !errors.Is(err, os.ErrNotExist)
-}
-
-func checkResults(denyGit bool, expected, got string) string {
-	expLines := slices.Collect(strings.Lines(expected))
-	gotLines := slices.Collect(strings.Lines(got))
-
-	type part struct {
-		head    string
-		regs    []*regexp.Regexp
-		all     bool
-		ordered bool
-	}
-
-	var parts []*part
-	var current *part
-	for _, expLine := range expLines {
-		if strings.HasPrefix(expLine, "\tlan: ") {
-			current = &part{all: true, ordered: true}
-
-			expLineParts := strings.SplitN(expLine, "(", 2)
-			if len(expLineParts) == 2 {
-				expLine = expLineParts[0]
-				optionsStr := expLineParts[1]
-				optionsStr = strings.TrimSpace(optionsStr)
-				optionsStr = strings.TrimSuffix(optionsStr, ")")
-				optionsStrParts := strings.Split(optionsStr, ",")
-				for _, p := range optionsStrParts {
-					switch p := strings.TrimSpace(p); p {
-					case "not all":
-						current.all = false
-					case "unordered":
-						current.ordered = false
-					default:
-						return fmt.Sprintf("unkonwn option near %q", p)
-					}
-				}
-			}
-			parts = append(parts, current)
-			current.head = strings.TrimSpace(expLine)
-		} else if !unicode.IsSpace([]rune(expLine)[0]) {
-			if current == nil {
-				return fmt.Sprintf("syntax error: unexpected %q\n", expLine)
-			}
-			expLine = strings.TrimSpace(expLine)
-			reg, err := regexp.Compile(expLine)
-			if err != nil {
-				return err.Error()
-			}
-			current.regs = append(current.regs, reg)
-		} else {
-			return fmt.Sprintf("syntax error: %q", expLine)
-		}
-	}
-
-	var message strings.Builder
-	if len(parts) == 0 && len(gotLines) == 0 {
-		if denyGit {
-			message.WriteString("denyGit = true, want false\n")
-		}
-	} else if len(parts) == 0 && len(gotLines) > 0 {
-		if denyGit {
-			message.WriteString("denyGit = true, want false\n")
-		}
-		fmt.Fprintf(&message, "unexpected: %s\n", strings.Join(gotLines, "\n"))
-	} else if len(parts) > 0 && len(gotLines) == 0 {
-		if !denyGit {
-			message.WriteString("denyGit = false, want true\n")
-		}
-		fmt.Fprint(&message, "lan didn't report anything\n")
-	} else {
-		if !denyGit {
-			message.WriteString("denyGit = false, want true\n")
-		}
-	}
-
-	var gotIndex, partIndex int
-	var executingRegs bool
-	for gotIndex < len(gotLines) && partIndex < len(parts) {
-		gotLine := gotLines[gotIndex]
-		if strings.HasPrefix(gotLine, "\tlan: ") {
-			if executingRegs {
-				executingRegs = false
-				p := parts[partIndex]
-				for _, reg := range p.regs {
-					fmt.Fprintf(&message, "regexp not matched: %q\n", reg.String())
-				}
-				partIndex++
-				if partIndex >= len(parts) {
-					break
-				}
-			}
-			if parts[partIndex].head == strings.TrimSpace(gotLine) {
-				gotIndex++
-			} else {
-				fmt.Fprintf(&message, "%q != %q\n", strings.TrimSpace(gotLine), parts[partIndex].head)
-				partIndex++
-			}
-		} else if strings.HasPrefix(gotLine, "\tlan version: ") {
-			if executingRegs {
-				executingRegs = false
-				p := parts[partIndex]
-				for _, reg := range p.regs {
-					fmt.Fprintf(&message, "regexp not matched: %q\n", reg.String())
-				}
-				partIndex++
-			}
-			gotIndex++
-		} else {
-			executingRegs = true
-			p := parts[partIndex]
-			gotLine = strings.TrimSpace(gotLine)
-
-			if len(p.regs) == 0 {
-				if p.all {
-					fmt.Fprintf(&message, "unexpected %q\n", gotLine)
-				}
-				gotIndex++
-				continue
-			}
-
-			if p.ordered {
-				if p.all {
-					if !p.regs[0].MatchString(gotLine) {
-						fmt.Fprintf(&message, "unexpected %q\n", gotLine)
-					}
-					p.regs = slices.Delete(p.regs, 0, 1)
-				} else if p.regs[0].MatchString(gotLine) {
-					p.regs = slices.Delete(p.regs, 0, 1)
-				}
-			} else {
-				if p.all {
-					var matched bool
-					for i, reg := range p.regs {
-						if reg.MatchString(gotLine) {
-							p.regs = slices.Delete(p.regs, i, i+1)
-							matched = true
-							break
-						}
-					}
-					if !matched {
-						fmt.Fprintf(&message, "unexpected %q\n", gotLine)
-					}
-				} else {
-					for i, reg := range p.regs {
-						if reg.MatchString(gotLine) {
-							p.regs = slices.Delete(p.regs, i, i+1)
-							break
-						}
-					}
-				}
-			}
-			gotIndex++
-		}
-	}
-	return message.String()
 }
