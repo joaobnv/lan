@@ -169,12 +169,17 @@ func newBuild(workDir string, opSys operatingSystem) operation {
 // run builds the packages.
 func (b build) run(ctx context.Context) (message string, err error) {
 	stdout := new(bytes.Buffer)
+	stderr := new(bytes.Buffer)
 
-	cmd := b.os.newCmd(ctx, b.workDir, stdout, nil,
+	cmd := b.os.newCmd(ctx, b.workDir, stdout, stderr,
 		"go", "test", "-c", "-json", "-vet=off", "-o="+os.DevNull, "."+string(os.PathSeparator)+"...")
 	err = cmd.Run()
 	if _, isExitError := errors.AsType[*exec.ExitError](err); err != nil && !isExitError {
 		return message, fmt.Errorf("\tlan: from building\n%w", err)
+	}
+
+	if b.noPackages(stderr) {
+		return "\tlan: from building\nno Go packages", nil
 	}
 
 	buildOk, err := b.result(stdout)
@@ -190,11 +195,20 @@ func (b build) run(ctx context.Context) (message string, err error) {
 	return
 }
 
+func (b build) noPackages(stderr *bytes.Buffer) bool {
+	for line := range strings.Lines(stderr.String()) {
+		if strings.TrimSpace(line) == "no packages to test" {
+			return true
+		}
+	}
+	return false
+}
+
 // result decodes r and reports whether the build was ok.
-func (t build) result(r io.Reader) (buildOk bool, err error) {
+func (b build) result(stdout io.Reader) (buildOk bool, err error) {
 	buildOk = true
 
-	dec := jsontext.NewDecoder(r)
+	dec := jsontext.NewDecoder(stdout)
 	for {
 		var te testEvent
 		if err = json.UnmarshalDecode(dec, &te); err == io.EOF {
@@ -347,19 +361,32 @@ func newVet(workDir string, opSys operatingSystem) operation {
 }
 
 // run executes "go vet ./...".
-func (vp vet) run(ctx context.Context) (message string, err error) {
+func (v vet) run(ctx context.Context) (message string, err error) {
 	stderr := new(bytes.Buffer)
 	stderr.WriteString("\tlan: from go vet\n")
 
-	cmd := vp.os.newCmd(ctx, vp.workDir, nil, stderr, "go", "vet", "."+string(os.PathSeparator)+"...")
+	cmd := v.os.newCmd(ctx, v.workDir, nil, stderr, "go", "vet", "."+string(os.PathSeparator)+"...")
 	err = cmd.Run()
 	if _, isExitError := errors.AsType[*exec.ExitError](err); err != nil && !isExitError {
 		return "", fmt.Errorf("\tlan: from go vet\n%w", err)
 	} else if err != nil {
-		return strings.TrimRightFunc(stderr.String(), unicode.IsSpace), nil
+		str := stderr.String()
+		if v.noPackages(str) {
+			return "\tlan: from go vet\nno Go packages", nil
+		}
+		return strings.TrimRightFunc(str, unicode.IsSpace), nil
 	}
 
 	return
+}
+
+func (v vet) noPackages(stderr string) bool {
+	for line := range strings.Lines(stderr) {
+		if strings.TrimSpace(line) == "no packages to vet" {
+			return true
+		}
+	}
+	return false
 }
 
 // staticcheck is a operation that executes the staticcheck linter in the packages, if it is installed.

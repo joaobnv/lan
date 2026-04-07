@@ -626,8 +626,6 @@ func TestCoverProfileOpenError_tests(t *testing.T) {
 
 // test the case where the reading of the cover profile returns an error.
 func TestScannerError_tests(t *testing.T) {
-	t.Parallel()
-
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
