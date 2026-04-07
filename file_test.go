@@ -41,7 +41,7 @@ func TestDirsMainPT(t *testing.T) {
 	denyGit := exitCode != 0
 	message := defaultOS.stdout.(*bytes.Buffer).String()
 
-	message = strings.TrimSuffix(message, "\tlan version: "+version)
+	message = strings.TrimSuffix(message, "\tlan version: "+version+"\n")
 	message = strings.TrimRightFunc(message, unicode.IsSpace)
 
 	if err := d.check(denyGit, message); err != nil {
@@ -73,7 +73,7 @@ func TestDirsMainSE(t *testing.T) {
 	denyGit := exitCode != 0
 	message := defaultOS.stdout.(*bytes.Buffer).String()
 
-	message = strings.TrimSuffix(message, "\tlan version: "+version)
+	message = strings.TrimSuffix(message, "\tlan version: "+version+"\n")
 	message = strings.TrimRightFunc(message, unicode.IsSpace)
 
 	if err := d.check(denyGit, message); err != nil {
@@ -247,9 +247,13 @@ func unmarshalFile(dirPath, fileName string) (f *file, err error) {
 		return nil, nil
 	}
 
-	f = new(file)
-	f.dirPath = dirPath
-	f.fileName = fileName
+	f = &file{
+		dirPath:          dirPath,
+		fileName:         fileName,
+		all:              true,
+		ordered:          true,
+		regexpQuantifier: "all",
+	}
 
 	if err = f.setHead(fileName); err != nil {
 		return
@@ -317,10 +321,6 @@ func (f *file) unmarshallOptions(line []byte) error {
 	if len(line) == 0 {
 		return nil
 	}
-
-	f.all = true
-	f.ordered = true
-	f.regexpQuantifier = "all"
 
 	notAll := []byte("not all")
 	unordered := []byte("unordered")
@@ -474,29 +474,30 @@ func (f *file) checkRegexps(bodyLines []string) error {
 }
 
 func (f *file) writeExpectedAndGot(b *bytes.Buffer, expected, got []string) {
-	tw := tabwriter.NewWriter(b, 10, 2, 1, ' ', 0)
+	tw := tabwriter.NewWriter(b, 4, 2, 1, ' ', 0)
 
 	toShow := func(line string) string {
 		line = strings.TrimRight(line, "\t\r\n")
 		return strings.ReplaceAll(line, "\t", strings.Repeat(" ", 4))
 	}
 
+	fmt.Fprintf(tw, "EXPECTED\t\tGOT\n")
 	for i := range min(len(expected), len(got)) {
 		expectedLine := toShow(expected[i])
 		gotLine := toShow(got[i])
-		fmt.Fprintf(tw, "%s\t%s\n", expectedLine, gotLine)
+		fmt.Fprintf(tw, "%s\t\t%s\n", expectedLine, gotLine)
 	}
 
 	if len(expected) > len(got) {
 		for i := len(got); i < len(expected); i++ {
 			expectedLine := toShow(expected[i])
-			fmt.Fprintf(tw, "%s\t\n", expectedLine)
+			fmt.Fprintf(tw, "%s\t\t\n", expectedLine)
 		}
 	}
 	if len(got) > len(expected) {
 		for i := len(expected); i < len(got); i++ {
 			gotLine := toShow(got[i])
-			fmt.Fprintf(tw, "\t%s\n", gotLine)
+			fmt.Fprintf(tw, "\t\t%s\n", gotLine)
 		}
 	}
 

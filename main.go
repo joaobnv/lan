@@ -234,10 +234,14 @@ func newThereAreTests(workDir string, opSys operatingSystem) operation {
 
 // run checks if the packages need and have tests.
 func (t thereAreTests) run(ctx context.Context) (message string, err error) {
-	need, err := t.need(ctx)
+	need, hasPackages, err := t.need(ctx)
 	if err != nil {
 		return
 	}
+	if !hasPackages {
+		return "\tlan: from checking if there are tests\nno Go packages", nil
+	}
+
 	has, err := t.has(ctx)
 	if err != nil {
 		return
@@ -253,10 +257,8 @@ func (t thereAreTests) run(ctx context.Context) (message string, err error) {
 }
 
 // need returns the packages that need tests.
-func (t thereAreTests) need(ctx context.Context) ([]string, error) {
+func (t thereAreTests) need(ctx context.Context) (result []string, hasPackages bool, err error) {
 	// We dont support folders with multiple non-test packages.
-	var result []string
-
 	cfg := &packages.Config{
 		Dir:     t.workDir,
 		Context: ctx,
@@ -264,14 +266,18 @@ func (t thereAreTests) need(ctx context.Context) ([]string, error) {
 	}
 	pkgs, err := packages.Load(cfg, "."+string(os.PathSeparator)+"...")
 	if err != nil {
-		return nil, err
+		return
+	}
+
+	if len(pkgs) == 0 {
+		return
 	}
 
 	funcDecl := func(e ast.Decl) bool { _, ok := e.(*ast.FuncDecl); return ok }
 
 	for _, pkg := range pkgs {
 		if len(pkg.Errors) > 0 {
-			return nil, t.joinErrors(pkg.Errors...)
+			return nil, false, t.joinErrors(pkg.Errors...)
 		}
 		for _, s := range pkg.Syntax {
 			if slices.ContainsFunc(s.Decls, funcDecl) {
@@ -282,7 +288,7 @@ func (t thereAreTests) need(ctx context.Context) ([]string, error) {
 		}
 	}
 
-	return result, nil
+	return result, true, nil
 }
 
 // has reports wheter the packages have tests.
@@ -406,11 +412,8 @@ func newStaticcheck(workDir string, opSys operatingSystem) operation {
 // If staticcheck was installed with "go get -tool" then run executes "go tool staticcheck".
 // Otherwise, if installed with "go install" then run executes "staticcheck". If installed
 // with both methods then run executes executes "go tool staticcheck".
-func (sp staticcheck) run(ctx context.Context) (message string, err error) {
-	buf := new(bytes.Buffer)
-	buf.WriteString("\tlan: from staticcheck\n")
-
-	cmd, err := sp.command(ctx)
+func (s staticcheck) run(ctx context.Context) (message string, err error) {
+	cmd, err := s.command(ctx)
 	if err != nil {
 		return "", fmt.Errorf("\tlan: from staticcheck\n%w", err)
 	}
@@ -426,12 +429,12 @@ func (sp staticcheck) run(ctx context.Context) (message string, err error) {
 	wg.Go(func() {
 		var r result
 		r.withTests = true
-		r.message, r.err = sp.withTests(ctx, cmd)
+		r.message, r.err = s.withTests(ctx, cmd)
 		chResult <- r
 	})
 	wg.Go(func() {
 		var r result
-		r.message, r.err = sp.withoutTests(ctx, cmd)
+		r.message, r.err = s.withoutTests(ctx, cmd)
 		chResult <- r
 	})
 
@@ -455,8 +458,7 @@ func (sp staticcheck) run(ctx context.Context) (message string, err error) {
 		} else if results[i].message != "" {
 			// withTests has precedence, so if there are a function not used by the test and the non-test code
 			// then it wont be reported two times.
-			buf.WriteString(results[i].message)
-			return strings.TrimRightFunc(buf.String(), unicode.IsSpace), nil
+			return strings.TrimRightFunc(results[i].message, unicode.IsSpace), nil
 		}
 	}
 
@@ -464,20 +466,20 @@ func (sp staticcheck) run(ctx context.Context) (message string, err error) {
 }
 
 // command determines what command to use, "go tool staticcheck" or "staticcheck".
-func (sp staticcheck) command(ctx context.Context) (cmd []string, err error) {
-	cmd, err = sp.installedWithGoTool(ctx)
+func (s staticcheck) command(ctx context.Context) (cmd []string, err error) {
+	cmd, err = s.installedWithGoTool(ctx)
 	if cmd != nil {
 		return
 	}
 
-	cmd, errSys := sp.installedInTheSystem()
+	cmd, errSys := s.installedInTheSystem()
 	err = cmp.Or(err, errSys)
 	return
 }
 
-func (sp staticcheck) installedWithGoTool(ctx context.Context) (cmd []string, err error) {
+func (s staticcheck) installedWithGoTool(ctx context.Context) (cmd []string, err error) {
 	var stdout strings.Builder
-	goToolCmd := sp.os.newCmd(ctx, sp.workDir, &stdout, nil, "go", "tool")
+	goToolCmd := s.os.newCmd(ctx, s.workDir, &stdout, nil, "go", "tool")
 	if err = goToolCmd.Run(); err != nil {
 		return
 	}
@@ -491,7 +493,7 @@ func (sp staticcheck) installedWithGoTool(ctx context.Context) (cmd []string, er
 }
 
 // maybe installed with "go install".
-func (sp staticcheck) installedInTheSystem() (cmd []string, err error) {
+func (s staticcheck) installedInTheSystem() (cmd []string, err error) {
 	if _, err = exec.LookPath("staticcheck"); errors.Is(err, exec.ErrNotFound) {
 		return nil, nil
 	} else if err != nil {
@@ -502,14 +504,19 @@ func (sp staticcheck) installedInTheSystem() (cmd []string, err error) {
 }
 
 // withTests executes staticcheck considering the tests.
-func (sp staticcheck) withTests(ctx context.Context, cmd []string) (message string, err error) {
+func (s staticcheck) withTests(ctx context.Context, cmd []string) (message string, err error) {
 	var b strings.Builder
+	var stderr strings.Builder
 	cmd = append(cmd, "."+string(os.PathSeparator)+"...")
-	execCmd := sp.os.newCmd(ctx, sp.workDir, &b, nil, cmd[0], cmd[1:]...)
+	execCmd := s.os.newCmd(ctx, s.workDir, &b, &stderr, cmd[0], cmd[1:]...)
 
 	err = execCmd.Run()
 	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
 		return b.String(), nil
+	}
+
+	if s.noPackages(stderr.String()) {
+		return "\tlan: from staticcheck\nno Go packages", nil
 	}
 
 	return
@@ -519,17 +526,33 @@ func (sp staticcheck) withTests(ctx context.Context, cmd []string) (message stri
 //
 // With the "-tests=false" parameter a function is not considered used if only tests call it.
 // I think that only the U1000 check is afected by "-tests=false".
-func (sp staticcheck) withoutTests(ctx context.Context, cmd []string) (message string, err error) {
+func (s staticcheck) withoutTests(ctx context.Context, cmd []string) (message string, err error) {
 	var b strings.Builder
+	var stderr strings.Builder
 	cmd = append(cmd, "-tests=false", "-checks=U1000", "."+string(os.PathSeparator)+"...")
-	execCmd := sp.os.newCmd(ctx, sp.workDir, &b, nil, cmd[0], cmd[1:]...)
+	execCmd := s.os.newCmd(ctx, s.workDir, &b, &stderr, cmd[0], cmd[1:]...)
 
 	err = execCmd.Run()
 	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
 		return b.String(), nil
 	}
 
+	if s.noPackages(stderr.String()) {
+		return "\tlan: from staticcheck\nno Go packages", nil
+	}
+
 	return
+}
+
+func (s staticcheck) noPackages(stderr string) bool {
+	for line := range strings.Lines(stderr) {
+		line = strings.TrimSpace(line)
+		parts := strings.SplitN(line, `"`, 3)
+		if parts[0] == `warning: ` && parts[2] == ` matched no packages` {
+			return true
+		}
+	}
+	return false
 }
 
 // packageOperation is operates in only one packages.
@@ -634,6 +657,9 @@ func (t tests) run(ctx context.Context) (message string, err error) {
 	if err != nil {
 		return "", fmt.Errorf("\tlan: from executing the tests\n%w", err)
 	}
+	if len(pkgs) == 0 {
+		return "\tlan: from executing the tests\nno Go packages", nil
+	}
 
 	g := newPkgOpGroup()
 
@@ -656,7 +682,11 @@ func (t tests) listPackages(workDir string, opSys operatingSystem) (pkgs []strin
 	err = nil
 
 	if stderr.Len() > 0 {
-		return nil, errors.New(strings.TrimRightFunc(stderr.String(), unicode.IsSpace))
+		str := stderr.String()
+		if t.noPackages(str) {
+			return pkgs, nil
+		}
+		return nil, errors.New(strings.TrimRightFunc(str, unicode.IsSpace))
 	}
 
 	for line := range bytes.Lines(stdout.Bytes()) {
@@ -664,6 +694,15 @@ func (t tests) listPackages(workDir string, opSys operatingSystem) (pkgs []strin
 	}
 
 	return
+}
+
+func (t tests) noPackages(stderr string) bool {
+	for line := range strings.Lines(stderr) {
+		if strings.TrimSpace(line) == `go: warning: "./..." matched no packages` {
+			return true
+		}
+	}
+	return false
 }
 
 // testEvent is a event generated by the test command.

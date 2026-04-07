@@ -1,1 +1,1 @@
-TestSub failed
+no Go packages
