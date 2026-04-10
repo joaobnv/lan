@@ -30,9 +30,3 @@ the hooks folder. Then go to the folder of your repository and invoke Lan with t
 
 Don't want to have to copy Lan to your hooks folder every time Lan is updated? Challenge: create a way so you only need
 to run the `go install` command and all your repositories will have the new version of Lan without you having to copy it.
-
-# Change Log
-
-### 0.1.0
-
-Now Lan runs the staticcheck.
