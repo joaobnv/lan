@@ -33,5 +33,7 @@ commit-msg
 # propositions of ideas and discussion. 
 issues
 
-# release notes.
-release_notes
+# for the writing of the README.md file.
+readme
+
+testdata/gen

@@ -537,10 +537,6 @@ func (s staticcheck) withoutTests(ctx context.Context, cmd []string) (message st
 		return b.String(), nil
 	}
 
-	if s.noPackages(stderr.String()) {
-		return "\tlan: from staticcheck\nno Go packages", nil
-	}
-
 	return
 }
 
