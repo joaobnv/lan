@@ -355,7 +355,7 @@ func (f *file) testOp(t *testing.T) {
 
 	message, err := f.op().run(t.Context())
 	if err != nil {
-		message = strings.TrimRightFunc(err.Error(), unicode.IsSpace)
+		return
 	}
 
 	if strings.TrimRightFunc(message, unicode.IsSpace) != message {
@@ -395,7 +395,10 @@ func (f *file) check(message string) error {
 	}
 
 	if strings.TrimSpace(gotLines[0]) != f.head {
-		return nil
+		if len(f.regs) == 0 {
+			return nil
+		}
+		return f.createError("invalid head", gotLines)
 	}
 
 	if len(f.regs) == 0 {

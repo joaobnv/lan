@@ -458,7 +458,7 @@ func (s staticcheck) run(ctx context.Context) (message string, err error) {
 		} else if results[i].message != "" {
 			// withTests has precedence, so if there are a function not used by the test and the non-test code
 			// then it wont be reported two times.
-			return strings.TrimRightFunc(results[i].message, unicode.IsSpace), nil
+			return "\tlan: from staticcheck\n" + strings.TrimRightFunc(results[i].message, unicode.IsSpace), nil
 		}
 	}
 
@@ -516,7 +516,7 @@ func (s staticcheck) withTests(ctx context.Context, cmd []string) (message strin
 	}
 
 	if s.noPackages(stderr.String()) {
-		return "\tlan: from staticcheck\nno Go packages", nil
+		return "no Go packages", nil
 	}
 
 	return
