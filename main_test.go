@@ -596,7 +596,7 @@ func TestCmdNoJson_thereAreTests(t *testing.T) {
 	})
 
 	pkgOp := newThereAreTests(wd, newOperatingSystem()).(thereAreTests)
-	if _, err = pkgOp.has(t.Context()); err == nil {
+	if _, err = pkgOp.has(); err == nil {
 		t.Error("err == nil")
 	}
 }

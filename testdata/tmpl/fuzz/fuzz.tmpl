@@ -1,0 +1,36 @@
+{{- /* Copyright (c) 2026, João Breno. See the license. */ -}}
+
+{{- define "fuzz" -}}
+	{{- $name := "FuzzAdd" -}}
+	{{- if .WithoutFuzzPrefix -}}
+	  {{- $name = "fuzzAdd" -}}
+	{{- else if .LowercaseAfterFuzz -}}
+	  {{- $name = "Fuzzadd" -}}
+	{{- end -}}
+
+	{{- /* TODO: consider the case where there is not a param */ -}}
+	{{- $paramPrefix := "f " -}}
+	{{- if .ParamFIsPointer -}}
+	  {{- $paramPrefix = "f *" -}}
+	{{- end -}}
+
+	{{- $paramPkg := "testing." -}}
+	{{- if .ImportDot -}}
+	  {{- $paramPkg = "" -}}
+	{{- else if .ImportRename -}}
+	  {{- $paramPkg = "tt." -}}
+	{{- end -}}
+
+	{{- $paramTypeName := "F" -}}
+	{{- if and .AliasToTestingF (not .AliasToTestingFNamedF) -}}
+	  {{- $paramTypeName = "G" -}}
+	{{- end -}}
+
+func {{$name}}({{$paramPrefix}}{{$paramPkg}}{{$paramTypeName}}) {  {{- "\n" -}}
+	{{- if and .AliasToTestingFPointer .ParamFIsPointer -}}
+  (*f).Error("Am I a test?")
+	{{- else -}}
+	f.Error("Am I a test?")
+	{{- end -}}  {{- "\n" -}}
+}  {{- "\n\n"}}
+{{- end -}}

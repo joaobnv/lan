@@ -125,14 +125,14 @@ func dirsForTest(t *testing.T) (result []string) {
 	return
 }
 
-type dir struct {
+type fileTestDir struct {
 	path          string
 	fileForPrefix map[string]*file
 	fileForName   map[string]*file
 }
 
-func unmarshalDir(path string) (d *dir, err error) {
-	d = &dir{
+func unmarshalDir(path string) (d *fileTestDir, err error) {
+	d = &fileTestDir{
 		path:          path,
 		fileForPrefix: map[string]*file{},
 		fileForName:   map[string]*file{},
@@ -161,7 +161,7 @@ func unmarshalDir(path string) (d *dir, err error) {
 	return
 }
 
-func (d *dir) testRun(t *testing.T) {
+func (d *fileTestDir) testRun(t *testing.T) {
 	t.Parallel()
 
 	denyGit, message := run(runConfig{workDir: d.path, os: newOperatingSystem(), testTimeout: d.testTimeout()})
@@ -173,7 +173,7 @@ func (d *dir) testRun(t *testing.T) {
 	}
 }
 
-func (d *dir) check(denyGit bool, message string) error {
+func (d *fileTestDir) check(denyGit bool, message string) error {
 	wantDenyGit := d.wantDenyGit()
 	if !denyGit {
 		if wantDenyGit {
@@ -196,7 +196,7 @@ func (d *dir) check(denyGit bool, message string) error {
 	return f.check(message)
 }
 
-func (d *dir) testOperations(t *testing.T) {
+func (d *fileTestDir) testOperations(t *testing.T) {
 	t.Parallel()
 
 	for _, f := range d.fileForName {
@@ -205,7 +205,7 @@ func (d *dir) testOperations(t *testing.T) {
 	}
 }
 
-func (d *dir) wantDenyGit() bool {
+func (d *fileTestDir) wantDenyGit() bool {
 	for _, f := range d.fileForName {
 		if len(f.regs) > 0 {
 			return true
@@ -214,7 +214,7 @@ func (d *dir) wantDenyGit() bool {
 	return false
 }
 
-func (d *dir) testTimeout() (dur time.Duration) {
+func (d *fileTestDir) testTimeout() (dur time.Duration) {
 	f := d.fileForName["tests.txt"]
 	if f != nil && f.testTimeout != dur {
 		return f.testTimeout

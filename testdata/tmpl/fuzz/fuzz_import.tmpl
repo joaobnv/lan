@@ -1,0 +1,31 @@
+{{- /* Copyright (c) 2026, João Breno. See the license. */ -}}
+
+{{- define "fuzz-import-production" -}}
+	{{- $pkgPath := "testing" -}}
+	{{- if .ImportOtherTesting -}}
+	  {{- $pkgPath = (printf "%s/%s" .PkgPath "fuzz/testing") -}}
+	{{- end -}}
+
+	{{- if .ImportDot -}}
+import . "{{$pkgPath}}"  {{- "\n\n"}}
+	{{- else if .ImportRename -}}
+import tt "{{$pkgPath}}"  {{- "\n\n"}}
+	{{- else -}}
+import "{{$pkgPath}}" {{- "\n\n"}}
+	{{- end -}}
+{{- end -}}
+
+{{- define "fuzz-import-test" -}}
+	{{- $pkgPath := "testing" -}}
+	{{- if .ImportOtherTesting -}}
+	  {{- $pkgPath = (printf "%s/%s" .PkgPath "fuzz/testing") -}}
+	{{- end -}}
+
+	{{- if .ImportDot -}}
+import . "{{$pkgPath}}"  {{- "\n\n"}}
+	{{- else if .ImportRename -}}
+import tt "{{$pkgPath}}"  {{- "\n\n"}}
+	{{- else -}}
+import "{{$pkgPath}}" {{- "\n\n"}}
+	{{- end -}}
+{{- end -}}

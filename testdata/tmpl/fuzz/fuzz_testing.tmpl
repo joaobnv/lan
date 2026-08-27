@@ -1,0 +1,19 @@
+package testing
+
+// Copyright (c) 2026, João Breno. See the license.  {{- "\n\n"}}
+
+import tt "testing"  {{- "\n\n"}}
+
+{{- if .AliasToTestingFPointer -}}
+type f = *tt.F  {{- "\n\n"}}
+{{- else -}}
+type f = tt.F  {{- "\n\n"}}
+{{- end -}}
+
+{{- if .AliasToTestingF -}}
+  {{- if .AliasToTestingFNamedF -}}
+type F = f  {{- "\n\n"}}
+  {{- else -}}
+type G = f  {{- "\n\n"}}
+  {{- end -}}
+{{- end -}}

@@ -1,1 +1,2 @@
+sptnt\.go:6:13: unexported struct field cannot have non\-ignored `json:"Bar"` tag \(SA5008\)
 .* \(ST1017\)$

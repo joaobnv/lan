@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/types"
 	"io"
 	"os"
 	"os/exec"
@@ -22,6 +23,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/tools/go/packages"
 )
@@ -242,13 +244,13 @@ func (t thereAreTests) run(ctx context.Context) (message string, err error) {
 		return "\tlan: from checking if there are tests\nno Go packages", nil
 	}
 
-	has, err := t.has(ctx)
+	has, err := t.has()
 	if err != nil {
 		return
 	}
 
 	for _, needPkg := range need {
-		if !slices.Contains(has, needPkg) {
+		if !has[needPkg] {
 			return fmt.Sprintf("\tlan: from checking if there are tests\n%s has no tests", needPkg), nil
 		}
 	}
@@ -291,62 +293,61 @@ func (t thereAreTests) need(ctx context.Context) (result []string, hasPackages b
 	return result, true, nil
 }
 
-// has reports wheter the packages have tests.
-func (t thereAreTests) has(ctx context.Context) ([]string, error) {
-	stdout := new(bytes.Buffer)
-	cmd := t.os.newCmd(ctx,
-		t.workDir, stdout, nil,
-		"go", "test", "-json", "-vet=off", "-list=(^Test)|(^Fuzz)", "."+string(os.PathSeparator)+"...",
-	)
-
-	err := cmd.Run()
-	if _, isExitError := errors.AsType[*exec.ExitError](err); err != nil && !isExitError {
-		return nil, err
+// Has report whether the packages have tests.
+func (t thereAreTests) has() (result map[string]bool, err error) {
+	cfg := &packages.Config{
+		Dir:   t.workDir,
+		Mode:  packages.NeedName | packages.NeedFiles | packages.NeedSyntax | packages.NeedTypesInfo,
+		Tests: true,
+	}
+	pkgs, err := packages.Load(cfg, "."+string(os.PathSeparator)+"...")
+	if err != nil {
+		return result, err
 	}
 
-	return t.decode(stdout)
+	dirs, err := t.dirs(pkgs)
+	if err != nil {
+		return
+	}
+
+	result = make(map[string]bool, len(dirs))
+	for _, d := range dirs {
+		result[d.pkgPath] = t.hasTests(d)
+	}
+
+	return
 }
 
-// decode decodes r and returns the packages that have tests.
-func (t thereAreTests) decode(r io.Reader) ([]string, error) {
-	var pkgs []string
+type dir struct {
+	pkgPath       string
+	productionPkg *packages.Package
+	testPkg       *packages.Package
+}
 
-	dec := jsontext.NewDecoder(r)
-	for {
-		var te testEvent
-		if err := json.UnmarshalDecode(dec, &te); err == io.EOF {
-			return pkgs, nil
-		} else if err != nil {
-			return pkgs, err
+func (t thereAreTests) dirs(pkgs []*packages.Package) (r map[string]*dir, err error) {
+	r = make(map[string]*dir)
+	for _, pkg := range pkgs {
+		if len(pkg.Errors) > 0 {
+			return r, t.joinErrors(pkg.Errors...)
 		}
-
-		if t.isTest(te) {
-			if !slices.Contains(pkgs, te.Package) {
-				pkgs = append(pkgs, te.Package)
-			}
+		if strings.HasSuffix(pkg.PkgPath, ".test") {
+			continue
 		}
-		if t.isBuildFailure(te) {
-			return pkgs, errors.New("build fail")
+		if r[pkg.Dir] == nil {
+			r[pkg.Dir] = &dir{pkgPath: t.pkgPath(pkg)}
+		}
+		if strings.HasSuffix(pkg.PkgPath, "_test") {
+			r[pkg.Dir].testPkg = pkg
+		} else {
+			r[pkg.Dir].productionPkg = pkg
 		}
 	}
-}
-
-// isTest reports whether the event represents a test listing.
-func (t thereAreTests) isTest(te testEvent) bool {
-	if te.Action != "output" || te.Package == "" {
-		return false
-	}
-	return strings.HasPrefix(te.Output, "Test") || strings.HasPrefix(te.Output, "Fuzz")
-}
-
-// isBuildFailure reports whether the event represents a build failure.
-func (t thereAreTests) isBuildFailure(te testEvent) bool {
-	return te.Action == "build-fail" && te.Test == "" && te.Package == ""
+	return
 }
 
 // joinErrors concatenates the error messages of the errors in errs, with a new line between
-// each message, and returns the error with it.
-func (t thereAreTests) joinErrors(errs ...packages.Error) error {
+// each message, and returns a error with it.
+func (t thereAreTests) joinErrors[E error](errs ...E) error {
 	var messages []string
 
 	for _, err := range errs {
@@ -354,6 +355,138 @@ func (t thereAreTests) joinErrors(errs ...packages.Error) error {
 	}
 
 	return errors.New(strings.Join(messages, "\n"))
+}
+
+func (t thereAreTests) pkgPath(pkg *packages.Package) string {
+	return strings.TrimSuffix(pkg.PkgPath, "_test")
+}
+
+func (t thereAreTests) hasTests(d *dir) bool {
+	return t.hasTestInProductionPkg(d.productionPkg) || t.hasTestInTestPkg(d.testPkg)
+}
+
+func (t thereAreTests) hasTestInProductionPkg(pkg *packages.Package) bool {
+	var funcDecls []*ast.FuncDecl
+
+	for _, s := range pkg.Syntax {
+		f := pkg.Fset.File(s.FileStart)
+		if !strings.HasSuffix(f.Name(), "_test.go") {
+			continue
+		}
+
+		for _, d := range s.Decls {
+			if f, ok := d.(*ast.FuncDecl); ok {
+				funcDecls = append(funcDecls, f)
+			}
+		}
+	}
+
+	for _, f := range funcDecls {
+		if t.isTestFunction(pkg.TypesInfo, f) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (t thereAreTests) hasTestInTestPkg(pkg *packages.Package) bool {
+	if pkg == nil {
+		return false
+	}
+
+	var funcDecls []*ast.FuncDecl
+
+	for _, s := range pkg.Syntax {
+		for _, d := range s.Decls {
+			if f, ok := d.(*ast.FuncDecl); ok {
+				funcDecls = append(funcDecls, f)
+			}
+		}
+	}
+
+	for _, f := range funcDecls {
+		if t.isTestFunction(pkg.TypesInfo, f) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isTestFunction reports wheter f has the signature of a test function.
+func (t thereAreTests) isTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
+	if t.isFuzzTestFunction(ti, f) {
+		return true
+	}
+
+	if !strings.HasPrefix(f.Name.Name, "Test") {
+		return false
+	}
+
+	if t.startWithLowerCaseLetter(strings.TrimPrefix(f.Name.Name, "Test")) {
+		return false
+	}
+
+	sig := ti.Defs[f.Name].Type().(*types.Signature)
+	if sig.Params().Len() != 1 {
+		return false
+	}
+
+	paramPointer, ok := sig.Params().At(0).Type().(*types.Pointer)
+	if !ok {
+		return false
+	}
+
+	elem := types.Unalias(paramPointer.Elem())
+	paramNamed, ok := elem.(*types.Named)
+	if !ok {
+		return false
+	}
+
+	if pkg := paramNamed.Obj().Pkg(); pkg == nil || pkg.Path() != "testing" {
+		return false
+	}
+
+	return true
+}
+
+// isFuzzTestFunction reports wheter f has the signature of a fuzz test function.
+func (t thereAreTests) isFuzzTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
+	if !strings.HasPrefix(f.Name.Name, "Fuzz") {
+		return false
+	}
+	if t.startWithLowerCaseLetter(strings.TrimPrefix(f.Name.Name, "Fuzz")) {
+		return false
+	}
+
+	sig := ti.Defs[f.Name].Type().(*types.Signature)
+	if sig.Params().Len() != 1 {
+		return false
+	}
+
+	paramPointer, ok := sig.Params().At(0).Type().(*types.Pointer)
+	if !ok {
+		return false
+	}
+
+	elem := types.Unalias(paramPointer.Elem())
+	paramNamed, ok := elem.(*types.Named)
+	if !ok {
+		return false
+	}
+
+	if pkg := paramNamed.Obj().Pkg(); pkg == nil || pkg.Path() != "testing" {
+		return false
+	}
+
+	return true
+}
+
+// startWithLowerCaseLetter reports if s start with a lower case letter.
+func (t thereAreTests) startWithLowerCaseLetter(s string) bool {
+	r, _ := utf8.DecodeRuneInString(s)
+	return unicode.IsLower(r)
 }
 
 // vet is a operation that executes "go vet" in each package.
@@ -484,7 +617,7 @@ func (s staticcheck) installedWithGoTool(ctx context.Context) (cmd []string, err
 		return
 	}
 	for line := range strings.Lines(stdout.String()) {
-		if strings.TrimSpace(line) == "honnef.co/go/tools/cmd/staticcheck" {
+		if strings.TrimSpace(line) == "staticcheck (honnef.co/go/tools/cmd/staticcheck)" {
 			return []string{"go", "tool", "staticcheck"}, nil
 		}
 	}
@@ -747,7 +880,7 @@ func newTestsPkg(timeout time.Duration, workDir string, opSys operatingSystem) p
 // run executes the tests of the package.
 func (tp testsPkg) run(ctx context.Context, pkg string) (message string, err error) {
 	// even when the tests reports 100.0% of coverage some statements may not have been executed.
-	// Then we use the coverprofile to verifiy whether all statements where executed.
+	// Then we use the coverprofile to verifiy whether all statements were executed.
 	cpf, err := tp.os.createTemp("", "coverprofile*.out")
 	if err != nil {
 		return

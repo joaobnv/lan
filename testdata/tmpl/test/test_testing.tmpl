@@ -1,0 +1,19 @@
+package testing
+
+// Copyright (c) 2026, João Breno. See the license.  {{- "\n\n"}}
+
+import tt "testing"  {{- "\n\n"}}
+
+{{- if .AliasToTestingTPointer -}}
+type t = *tt.T  {{- "\n\n"}}
+{{- else -}}
+type t = tt.T  {{- "\n\n"}}
+{{- end -}}
+
+{{- if .AliasToTestingT -}}
+  {{- if .AliasToTestingTNamedT -}}
+type T = t  {{- "\n\n"}}
+  {{- else -}}
+type U = t  {{- "\n\n"}}
+  {{- end -}}
+{{- end -}}
