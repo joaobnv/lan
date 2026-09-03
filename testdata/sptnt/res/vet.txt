@@ -1,1 +1,0 @@
-.* struct field bar has json tag but is not exported$

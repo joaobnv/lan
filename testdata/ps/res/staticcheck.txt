@@ -1,2 +1,0 @@
-(not all)
-f\\f_test\.go:14:25: don't use Yoda conditions \(ST1017\)

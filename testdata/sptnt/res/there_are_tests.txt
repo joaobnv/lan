@@ -1,1 +1,0 @@
-sptnt has no tests

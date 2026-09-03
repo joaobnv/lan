@@ -6,7 +6,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -15,6 +14,7 @@ import (
 	"go/ast"
 	"go/types"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"regexp"
@@ -28,30 +28,27 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
+var exit = os.Exit
+
 // the version of Lan.
 const version = "0.1.0"
 
 func main() {
-	workDir, err := defaultOS.getwd()
-	if err != nil {
-		fmt.Fprint(defaultOS.stdout, err)
-		defaultOS.exit(1)
-		return
-	}
-	denyGit, message := run(runConfig{workDir: workDir, os: defaultOS})
+	denyGit, message := run(runConfig{waitFunc: (*opGroup).waitFirst})
 	if denyGit {
-		fmt.Fprint(defaultOS.stdout, message)
+		fmt.Fprint(os.Stdout, message)
 		// I think that showing the version helps the user because Lan does not receive command line parameters
 		// that make it show its version.
-		fmt.Fprint(defaultOS.stdout, "\n\tlan version: "+version+"\n")
-		defaultOS.exit(1)
+		fmt.Fprint(os.Stdout, "\n\tlan version: "+version+"\n")
+		exit(1)
 	}
 }
 
 type runConfig struct {
 	workDir     string
-	os          operatingSystem
 	testTimeout time.Duration
+	tmpDir      string
+	waitFunc    func(*opGroup) (string, error)
 }
 
 // run executes the operations.
@@ -63,18 +60,26 @@ func run(cfg runConfig) (denyGit bool, message string) {
 	og := newOpGroup()
 	ctx := context.Background()
 
-	og.executeGo(ctx, newBuild(cfg.workDir, cfg.os))
-	og.executeGo(ctx, newThereAreTests(cfg.workDir, cfg.os))
-	og.executeGo(ctx, newVet(cfg.workDir, cfg.os))
-	og.executeGo(ctx, newStaticcheck(cfg.workDir, cfg.os))
-	og.executeGo(ctx, newTests(cfg.testTimeout, cfg.workDir, cfg.os))
+	buildOp := newBuild(cfg.workDir)
+	tat := newThereAreTests(cfg.workDir, buildOp)
+	vet := newVet(cfg.workDir, buildOp)
+	sc := newStaticcheck(cfg.workDir, buildOp)
+	ts := newTests(cfg.testTimeout, cfg.workDir, cfg.tmpDir, linters{tat, vet, sc})
 
-	message, err := og.wait()
+	og.executeGo(ctx, buildOp)
+	og.executeGo(ctx, tat)
+	og.executeGo(ctx, vet)
+	og.executeGo(ctx, sc)
+	og.executeGo(ctx, ts)
+
+	message, err := cfg.waitFunc(og)
+	if message != "" {
+		return true, message
+	}
 	if err != nil {
 		return true, strings.TrimRightFunc(err.Error(), unicode.IsSpace)
 	}
-
-	return message != "", message
+	return
 }
 
 // operation is a operation that can deny a git from proceding.
@@ -84,27 +89,17 @@ type operation interface {
 	run(ctx context.Context) (message string, err error)
 }
 
-// opGroup executes operations. The method wait returns the first failure, if any.
-// That is, the first operation result where the message is not empty or the error is non nil.
-// First with respect to the order of the calls to executeGo, that is, if multiple
-// operations return failures then wait returns the failure of the operation in relation
-// to which executeGo was called first.
-//
-// If there is no failure then wait returns the empty message and the nil error.
+// opGroup executes operations.
 type opGroup struct {
 	ops        []operation
 	cancellers []context.CancelFunc
 	rs         []opGroupOperationResult
 	wg         sync.WaitGroup
 	resultCh   chan opGroupOperationResult
-
-	// is so that the tests can determine how many operations have already been completed.
-	done        *sync.Cond
-	numberEnded int
 }
 
 func newOpGroup() *opGroup {
-	return &opGroup{resultCh: make(chan opGroupOperationResult), done: sync.NewCond(&sync.Mutex{})}
+	return &opGroup{resultCh: make(chan opGroupOperationResult)}
 }
 
 func (eg *opGroup) executeGo(ctx context.Context, op operation) {
@@ -117,17 +112,18 @@ func (eg *opGroup) executeGo(ctx context.Context, op operation) {
 	eg.wg.Go(func() {
 		message, err := op.run(ctx)
 		eg.resultCh <- opGroupOperationResult{
-			message: message, err: err, pos: pos, done: true,
+			message: message, err: err, pos: pos,
 		}
-
-		eg.done.L.Lock()
-		eg.numberEnded++
-		eg.done.Signal()
-		eg.done.L.Unlock()
 	})
 }
 
-func (eg *opGroup) wait() (message string, err error) {
+// waitFirst returns the first failure, if any. That is, the first operation result where the message is
+// not empty or the error is non nil. First with respect to the order of the calls to executeGo, that is,
+// if multiple operations return failures then wait returns the failure of the operation in relation
+// to which executeGo was called first.
+//
+// If there is no failure then waitFirst returns the empty message and the nil error.
+func (eg *opGroup) waitFirst() (message string, err error) {
 	go func() {
 		eg.wg.Wait()
 		close(eg.resultCh)
@@ -151,53 +147,91 @@ func (eg *opGroup) wait() (message string, err error) {
 	return "", nil
 }
 
+// waitAll returns the results of all operations. It respect the order of the calls to executeGo.
+// waitAll joins the messages with '\n'. It also join the errors with '\n'.
+//
+//lint:ignore U1000 to be used only by tests.
+func (eg *opGroup) waitAll() (message string, err error) {
+	go func() {
+		eg.wg.Wait()
+		close(eg.resultCh)
+	}()
+
+	for res := range eg.resultCh {
+		eg.rs[res.pos] = res
+	}
+
+	messages := make([]string, 0, len(eg.rs))
+	errs := make([]error, 0, len(eg.rs))
+
+	for _, r := range eg.rs {
+		if r.message != "" {
+			messages = append(messages, r.message)
+		}
+		if r.err != nil {
+			errs = append(errs, r.err)
+		}
+	}
+
+	return strings.Join(messages, "\n"), errors.Join(errs...)
+}
+
 type opGroupOperationResult struct {
-	message string
 	pos     int
+	message string
 	err     error
-	done    bool
 }
 
 // build is a operation that executes the build for each package.
 type build struct {
-	workDir string
-	os      operatingSystem
+	workDir    string
+	chOk       chan struct{}
+	chComplete chan struct{}
 }
 
-func newBuild(workDir string, opSys operatingSystem) operation {
-	return build{workDir: workDir, os: opSys}
+func newBuild(workDir string) *build {
+	return &build{workDir: workDir, chOk: make(chan struct{}), chComplete: make(chan struct{})}
 }
 
 // run builds the packages.
-func (b build) run(ctx context.Context) (message string, err error) {
-	stdout := new(bytes.Buffer)
-	stderr := new(bytes.Buffer)
+func (b *build) run(ctx context.Context) (message string, err error) {
+	defer func() {
+		if message == "" && err == nil {
+			close(b.chOk)
+		}
+		close(b.chComplete)
+	}()
 
-	cmd := b.os.newCmd(ctx, b.workDir, stdout, stderr,
-		"go", "test", "-c", "-json", "-vet=off", "-o="+os.DevNull, "."+string(os.PathSeparator)+"...")
-	err = cmd.Run()
-	if _, isExitError := errors.AsType[*exec.ExitError](err); err != nil && !isExitError {
-		return message, fmt.Errorf("\tlan: from building\n%w", err)
-	}
+	stdout, stderr, _ := execCommand(ctx, b.workDir, "go test -c -json -vet=off -o=%s .%c...", os.DevNull, os.PathSeparator)
 
 	if b.noPackages(stderr) {
 		return "\tlan: from building\nno Go packages", nil
 	}
 
-	buildOk, err := b.result(stdout)
-
-	if err != nil {
-		return "", fmt.Errorf("\tlan: from building\n%w", err)
+	if stderr.Len() > 0 {
+		msg := strings.TrimRightFunc(stderr.String(), unicode.IsSpace)
+		return fmt.Sprintf("\tlan: from building\n%s", msg), nil
 	}
 
-	if !buildOk {
+	if !b.buildOk(stdout) {
 		return "\tlan: from building\nbuild failed", nil
 	}
 
 	return
 }
 
-func (b build) noPackages(stderr *bytes.Buffer) bool {
+func (b *build) wait() bool {
+	<-b.chComplete
+
+	select {
+	case <-b.chOk:
+		return true
+	default:
+		return false
+	}
+}
+
+func (b *build) noPackages(stderr *bytes.Buffer) bool {
 	for line := range strings.Lines(stderr.String()) {
 		if strings.TrimSpace(line) == "no packages to test" {
 			return true
@@ -206,166 +240,152 @@ func (b build) noPackages(stderr *bytes.Buffer) bool {
 	return false
 }
 
-// result decodes r and reports whether the build was ok.
-func (b build) result(stdout io.Reader) (buildOk bool, err error) {
-	buildOk = true
-
+// buildOk decodes r and reports whether the build was ok.
+func (b *build) buildOk(stdout io.Reader) bool {
 	dec := jsontext.NewDecoder(stdout)
 	for {
 		var te testEvent
-		if err = json.UnmarshalDecode(dec, &te); err == io.EOF {
-			return buildOk, nil
-		} else if err != nil {
-			return false, err
+		if mustOrEOF(json.UnmarshalDecode(dec, &te)) {
+			return true
 		}
 		if te.Action == "build-fail" {
-			buildOk = false
+			return false
 		}
 	}
+}
+
+type linters []interface{ wait() bool }
+
+func (ls linters) wait() bool {
+	for _, l := range ls {
+		if !l.wait() {
+			return false
+		}
+	}
+	return true
 }
 
 // thereAreTests check if the packages need and have tests.
 type thereAreTests struct {
-	workDir string
-	os      operatingSystem
+	workDir    string
+	build      *build
+	chOk       chan struct{}
+	chComplete chan struct{}
 }
 
-func newThereAreTests(workDir string, opSys operatingSystem) operation {
-	return thereAreTests{workDir: workDir, os: opSys}
+func newThereAreTests(workDir string, build *build) *thereAreTests {
+	return &thereAreTests{workDir: workDir, build: build, chOk: make(chan struct{}), chComplete: make(chan struct{})}
 }
 
 // run checks if the packages need and have tests.
-func (t thereAreTests) run(ctx context.Context) (message string, err error) {
-	need, hasPackages, err := t.need(ctx)
-	if err != nil {
+func (t *thereAreTests) run(ctx context.Context) (message string, err error) {
+	if !t.build.wait() {
+		close(t.chComplete)
 		return
 	}
-	if !hasPackages {
-		return "\tlan: from checking if there are tests\nno Go packages", nil
-	}
-
-	has, err := t.has()
-	if err != nil {
-		return
-	}
-
-	for _, needPkg := range need {
-		if !has[needPkg] {
-			return fmt.Sprintf("\tlan: from checking if there are tests\n%s has no tests", needPkg), nil
+	defer func() {
+		if message == "" && err == nil {
+			close(t.chOk)
 		}
-	}
+		close(t.chComplete)
+	}()
 
-	return "", nil
-}
-
-// need returns the packages that need tests.
-func (t thereAreTests) need(ctx context.Context) (result []string, hasPackages bool, err error) {
-	// We dont support folders with multiple non-test packages.
-	cfg := &packages.Config{
-		Dir:     t.workDir,
-		Context: ctx,
-		Mode:    packages.NeedSyntax | packages.NeedFiles | packages.NeedName,
-	}
-	pkgs, err := packages.Load(cfg, "."+string(os.PathSeparator)+"...")
-	if err != nil {
-		return
-	}
-
-	if len(pkgs) == 0 {
-		return
-	}
-
-	funcDecl := func(e ast.Decl) bool { _, ok := e.(*ast.FuncDecl); return ok }
-
-	for _, pkg := range pkgs {
-		if len(pkg.Errors) > 0 {
-			return nil, false, t.joinErrors(pkg.Errors...)
+	for _, d := range t.dirs(ctx) {
+		if d.needTests && !d.hasTests {
+			return fmt.Sprintf("\tlan: from checking if there are tests\n%s has no tests", d.pkgPath), nil
 		}
-		for _, s := range pkg.Syntax {
-			if slices.ContainsFunc(s.Decls, funcDecl) {
-				if !slices.Contains(result, pkg.PkgPath) {
-					result = append(result, pkg.PkgPath)
-				}
-			}
-		}
-	}
-
-	return result, true, nil
-}
-
-// Has report whether the packages have tests.
-func (t thereAreTests) has() (result map[string]bool, err error) {
-	cfg := &packages.Config{
-		Dir:   t.workDir,
-		Mode:  packages.NeedName | packages.NeedFiles | packages.NeedSyntax | packages.NeedTypesInfo,
-		Tests: true,
-	}
-	pkgs, err := packages.Load(cfg, "."+string(os.PathSeparator)+"...")
-	if err != nil {
-		return result, err
-	}
-
-	dirs, err := t.dirs(pkgs)
-	if err != nil {
-		return
-	}
-
-	result = make(map[string]bool, len(dirs))
-	for _, d := range dirs {
-		result[d.pkgPath] = t.hasTests(d)
 	}
 
 	return
 }
 
+func (t *thereAreTests) wait() bool {
+	<-t.chComplete
+
+	select {
+	case <-t.chOk:
+		return true
+	default:
+		return false
+	}
+}
+
 type dir struct {
+	needTests     bool
+	hasTests      bool
 	pkgPath       string
 	productionPkg *packages.Package
 	testPkg       *packages.Package
 }
 
-func (t thereAreTests) dirs(pkgs []*packages.Package) (r map[string]*dir, err error) {
-	r = make(map[string]*dir)
+func (t *thereAreTests) dirs(ctx context.Context) (dirs []*dir) {
+	// We dont support folders with multiple non-test packages.
+	cfg := &packages.Config{
+		Dir:     t.workDir,
+		Context: ctx,
+		Mode:    packages.NeedName | packages.NeedFiles | packages.NeedSyntax | packages.NeedTypesInfo,
+		Tests:   true,
+	}
+	pkgs := must2(packages.Load(cfg, "."+string(os.PathSeparator)+"..."))
+	mustOk(len(pkgs) > 0)
+
+	dirsMap := make(map[string]*dir)
 	for _, pkg := range pkgs {
-		if len(pkg.Errors) > 0 {
-			return r, t.joinErrors(pkg.Errors...)
-		}
+		mustOk(len(pkg.Errors) == 0)
+
 		if strings.HasSuffix(pkg.PkgPath, ".test") {
 			continue
 		}
-		if r[pkg.Dir] == nil {
-			r[pkg.Dir] = &dir{pkgPath: t.pkgPath(pkg)}
+
+		d, ok := dirsMap[pkg.Dir]
+		if !ok {
+			d = &dir{pkgPath: t.pkgPath(pkg)}
+			dirs = append(dirs, d)
+			dirsMap[pkg.Dir] = d
 		}
 		if strings.HasSuffix(pkg.PkgPath, "_test") {
-			r[pkg.Dir].testPkg = pkg
+			mustOk(d.testPkg == nil)
+			d.testPkg = pkg
 		} else {
-			r[pkg.Dir].productionPkg = pkg
+			if d.productionPkg == nil || slices.ContainsFunc(pkg.GoFiles, func(name string) bool { return strings.HasSuffix(name, "_test.go") }) {
+				d.productionPkg = pkg
+			}
 		}
 	}
-	return
+
+	for _, d := range dirs {
+		d.hasTests = t.hasTests(d)
+		d.needTests = t.needTests(d)
+	}
+	return dirs
 }
 
-// joinErrors concatenates the error messages of the errors in errs, with a new line between
-// each message, and returns a error with it.
-func (t thereAreTests) joinErrors[E error](errs ...E) error {
-	var messages []string
+// needTests reports whether d need tests.
+func (t *thereAreTests) needTests(d *dir) bool {
+	funcDecl := func(e ast.Decl) bool { _, ok := e.(*ast.FuncDecl); return ok }
 
-	for _, err := range errs {
-		messages = append(messages, err.Error())
+	for _, s := range d.productionPkg.Syntax {
+		f := d.productionPkg.Fset.File(s.FileStart)
+		if strings.HasSuffix(f.Name(), "_test.go") {
+			continue
+		}
+		if slices.ContainsFunc(s.Decls, funcDecl) {
+			return true
+		}
 	}
 
-	return errors.New(strings.Join(messages, "\n"))
+	return false
 }
 
-func (t thereAreTests) pkgPath(pkg *packages.Package) string {
+func (t *thereAreTests) pkgPath(pkg *packages.Package) string {
 	return strings.TrimSuffix(pkg.PkgPath, "_test")
 }
 
-func (t thereAreTests) hasTests(d *dir) bool {
+func (t *thereAreTests) hasTests(d *dir) bool {
 	return t.hasTestInProductionPkg(d.productionPkg) || t.hasTestInTestPkg(d.testPkg)
 }
 
-func (t thereAreTests) hasTestInProductionPkg(pkg *packages.Package) bool {
+func (t *thereAreTests) hasTestInProductionPkg(pkg *packages.Package) bool {
 	var funcDecls []*ast.FuncDecl
 
 	for _, s := range pkg.Syntax {
@@ -390,13 +410,12 @@ func (t thereAreTests) hasTestInProductionPkg(pkg *packages.Package) bool {
 	return false
 }
 
-func (t thereAreTests) hasTestInTestPkg(pkg *packages.Package) bool {
+func (t *thereAreTests) hasTestInTestPkg(pkg *packages.Package) bool {
 	if pkg == nil {
 		return false
 	}
 
 	var funcDecls []*ast.FuncDecl
-
 	for _, s := range pkg.Syntax {
 		for _, d := range s.Decls {
 			if f, ok := d.(*ast.FuncDecl); ok {
@@ -415,128 +434,108 @@ func (t thereAreTests) hasTestInTestPkg(pkg *packages.Package) bool {
 }
 
 // isTestFunction reports wheter f has the signature of a test function.
-func (t thereAreTests) isTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
-	if t.isFuzzTestFunction(ti, f) {
-		return true
-	}
-
-	if !strings.HasPrefix(f.Name.Name, "Test") {
-		return false
-	}
-
-	if t.startWithLowerCaseLetter(strings.TrimPrefix(f.Name.Name, "Test")) {
-		return false
-	}
-
-	sig := ti.Defs[f.Name].Type().(*types.Signature)
-	if sig.Params().Len() != 1 {
-		return false
-	}
-
-	paramPointer, ok := sig.Params().At(0).Type().(*types.Pointer)
-	if !ok {
-		return false
-	}
-
-	elem := types.Unalias(paramPointer.Elem())
-	paramNamed, ok := elem.(*types.Named)
-	if !ok {
-		return false
-	}
-
-	if pkg := paramNamed.Obj().Pkg(); pkg == nil || pkg.Path() != "testing" {
-		return false
-	}
-
-	return true
+func (t *thereAreTests) isTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
+	return t.hasTestSignature(ti, f, "Test", "T") || t.isFuzzTestFunction(ti, f)
 }
 
 // isFuzzTestFunction reports wheter f has the signature of a fuzz test function.
-func (t thereAreTests) isFuzzTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
-	if !strings.HasPrefix(f.Name.Name, "Fuzz") {
+func (t *thereAreTests) isFuzzTestFunction(ti *types.Info, f *ast.FuncDecl) bool {
+	return t.hasTestSignature(ti, f, "Fuzz", "F")
+}
+
+func (t *thereAreTests) hasTestSignature(ti *types.Info, f *ast.FuncDecl, prefix string, paramTypeName string) bool {
+	if !strings.HasPrefix(f.Name.Name, prefix) {
 		return false
 	}
-	if t.startWithLowerCaseLetter(strings.TrimPrefix(f.Name.Name, "Fuzz")) {
+
+	if t.startWithLowerCaseLetter(strings.TrimPrefix(f.Name.Name, prefix)) {
 		return false
 	}
 
 	sig := ti.Defs[f.Name].Type().(*types.Signature)
-	if sig.Params().Len() != 1 {
-		return false
-	}
+	mustOk(sig.Params().Len() == 1)
 
-	paramPointer, ok := sig.Params().At(0).Type().(*types.Pointer)
-	if !ok {
-		return false
+	typePtr := mustOkType[*types.Pointer](sig.Params().At(0).Type())
+	var name string
+	switch elem := typePtr.Elem().(type) {
+	case *types.Named:
+		name = elem.Obj().Name()
+	case *types.Alias:
+		name = elem.Obj().Name()
 	}
+	mustOk(name == paramTypeName)
 
-	elem := types.Unalias(paramPointer.Elem())
-	paramNamed, ok := elem.(*types.Named)
-	if !ok {
-		return false
-	}
+	elem := types.Unalias(typePtr.Elem())
+	typeNamed := mustOkType[*types.Named](elem)
+	mustOk(typeNamed.Obj().Name() == paramTypeName)
 
-	if pkg := paramNamed.Obj().Pkg(); pkg == nil || pkg.Path() != "testing" {
-		return false
-	}
+	obj := typeNamed.Obj()
+	mustOk(obj.Pkg() != nil && obj.Pkg().Path() == "testing")
 
 	return true
 }
 
 // startWithLowerCaseLetter reports if s start with a lower case letter.
-func (t thereAreTests) startWithLowerCaseLetter(s string) bool {
+func (t *thereAreTests) startWithLowerCaseLetter(s string) bool {
 	r, _ := utf8.DecodeRuneInString(s)
 	return unicode.IsLower(r)
 }
 
 // vet is a operation that executes "go vet" in each package.
 type vet struct {
-	workDir string
-	os      operatingSystem
+	workDir    string
+	build      *build
+	chOk       chan struct{}
+	chComplete chan struct{}
 }
 
-func newVet(workDir string, opSys operatingSystem) operation {
-	return vet{workDir: workDir, os: opSys}
+func newVet(workDir string, build *build) *vet {
+	return &vet{workDir: workDir, build: build, chOk: make(chan struct{}), chComplete: make(chan struct{})}
 }
 
 // run executes "go vet ./...".
-func (v vet) run(ctx context.Context) (message string, err error) {
-	stderr := new(bytes.Buffer)
-	stderr.WriteString("\tlan: from go vet\n")
-
-	cmd := v.os.newCmd(ctx, v.workDir, nil, stderr, "go", "vet", "."+string(os.PathSeparator)+"...")
-	err = cmd.Run()
-	if _, isExitError := errors.AsType[*exec.ExitError](err); err != nil && !isExitError {
-		return "", fmt.Errorf("\tlan: from go vet\n%w", err)
-	} else if err != nil {
-		str := stderr.String()
-		if v.noPackages(str) {
-			return "\tlan: from go vet\nno Go packages", nil
+func (v *vet) run(ctx context.Context) (message string, err error) {
+	if !v.build.wait() {
+		close(v.chComplete)
+		return
+	}
+	defer func() {
+		if message == "" && err == nil {
+			close(v.chOk)
 		}
-		return strings.TrimRightFunc(str, unicode.IsSpace), nil
+		close(v.chComplete)
+	}()
+
+	_, stderr, exitError := execCommand(ctx, v.workDir, "go vet .%c...", os.PathSeparator)
+	if exitError {
+		message = strings.TrimRightFunc("\tlan: from go vet\n"+stderr.String(), unicode.IsSpace)
 	}
 
 	return
 }
 
-func (v vet) noPackages(stderr string) bool {
-	for line := range strings.Lines(stderr) {
-		if strings.TrimSpace(line) == "no packages to vet" {
-			return true
-		}
+func (v *vet) wait() bool {
+	<-v.chComplete
+
+	select {
+	case <-v.chOk:
+		return true
+	default:
+		return false
 	}
-	return false
 }
 
 // staticcheck is a operation that executes the staticcheck linter in the packages, if it is installed.
 type staticcheck struct {
-	workDir string
-	os      operatingSystem
+	workDir    string
+	build      *build
+	chOk       chan struct{}
+	chComplete chan struct{}
 }
 
 // newStaticcheck creates a staticcheck.
-func newStaticcheck(workDir string, opSys operatingSystem) operation {
-	return staticcheck{workDir: workDir, os: opSys}
+func newStaticcheck(workDir string, build *build) *staticcheck {
+	return &staticcheck{workDir: workDir, build: build, chOk: make(chan struct{}), chComplete: make(chan struct{})}
 }
 
 // run executes "staticcheck" and returns the message.
@@ -545,15 +544,25 @@ func newStaticcheck(workDir string, opSys operatingSystem) operation {
 // If staticcheck was installed with "go get -tool" then run executes "go tool staticcheck".
 // Otherwise, if installed with "go install" then run executes "staticcheck". If installed
 // with both methods then run executes executes "go tool staticcheck".
-func (s staticcheck) run(ctx context.Context) (message string, err error) {
-	cmd, err := s.command(ctx)
-	if err != nil {
-		return "", fmt.Errorf("\tlan: from staticcheck\n%w", err)
+func (s *staticcheck) run(ctx context.Context) (message string, err error) {
+	if !s.build.wait() {
+		close(s.chComplete)
+		return
+	}
+	defer func() {
+		if message == "" && err == nil {
+			close(s.chOk)
+		}
+		close(s.chComplete)
+	}()
+
+	format, args := s.command(ctx)
+	if format == "" {
+		return
 	}
 
 	type result struct {
 		message   string
-		err       error
 		withTests bool
 	}
 
@@ -562,12 +571,12 @@ func (s staticcheck) run(ctx context.Context) (message string, err error) {
 	wg.Go(func() {
 		var r result
 		r.withTests = true
-		r.message, r.err = s.withTests(ctx, cmd)
+		r.message = s.withTests(ctx, format, args...)
 		chResult <- r
 	})
 	wg.Go(func() {
 		var r result
-		r.message, r.err = s.withoutTests(ctx, cmd)
+		r.message = s.withoutTests(ctx, format, args...)
 		chResult <- r
 	})
 
@@ -579,6 +588,8 @@ func (s staticcheck) run(ctx context.Context) (message string, err error) {
 	results := make([]result, 2)
 	for r := range chResult {
 		if r.withTests {
+			// withTests has precedence, so if there are a function not used by the test and the non-test code
+			// then it wont be reported two times.
 			results[0] = r
 		} else {
 			results[1] = r
@@ -586,11 +597,7 @@ func (s staticcheck) run(ctx context.Context) (message string, err error) {
 	}
 
 	for i := range 2 {
-		if results[i].err != nil {
-			return "", fmt.Errorf("\tlan: from staticcheck\n%w", results[i].err)
-		} else if results[i].message != "" {
-			// withTests has precedence, so if there are a function not used by the test and the non-test code
-			// then it wont be reported two times.
+		if results[i].message != "" {
 			return "\tlan: from staticcheck\n" + strings.TrimRightFunc(results[i].message, unicode.IsSpace), nil
 		}
 	}
@@ -598,27 +605,32 @@ func (s staticcheck) run(ctx context.Context) (message string, err error) {
 	return
 }
 
-// command determines what command to use, "go tool staticcheck" or "staticcheck".
-func (s staticcheck) command(ctx context.Context) (cmd []string, err error) {
-	cmd, err = s.installedWithGoTool(ctx)
-	if cmd != nil {
-		return
-	}
+func (s *staticcheck) wait() bool {
+	<-s.chComplete
 
-	cmd, errSys := s.installedInTheSystem()
-	err = cmp.Or(err, errSys)
-	return
+	select {
+	case <-s.chOk:
+		return true
+	default:
+		return false
+	}
 }
 
-func (s staticcheck) installedWithGoTool(ctx context.Context) (cmd []string, err error) {
-	var stdout strings.Builder
-	goToolCmd := s.os.newCmd(ctx, s.workDir, &stdout, nil, "go", "tool")
-	if err = goToolCmd.Run(); err != nil {
+// command determines what command to use, "go tool staticcheck" or "staticcheck".
+func (s *staticcheck) command(ctx context.Context) (format string, args []any) {
+	if format, args = s.installedWithGoTool(ctx); format != "" {
 		return
 	}
+	return s.installedInTheSystem()
+}
+
+func (s *staticcheck) installedWithGoTool(ctx context.Context) (format string, args []any) {
+	stdout, _, exitError := execCommand(ctx, s.workDir, "go tool")
+	mustOk(!exitError)
+
 	for line := range strings.Lines(stdout.String()) {
 		if strings.TrimSpace(line) == "staticcheck (honnef.co/go/tools/cmd/staticcheck)" {
-			return []string{"go", "tool", "staticcheck"}, nil
+			return "go tool staticcheck", nil
 		}
 	}
 
@@ -626,62 +638,30 @@ func (s staticcheck) installedWithGoTool(ctx context.Context) (cmd []string, err
 }
 
 // maybe installed with "go install".
-func (s staticcheck) installedInTheSystem() (cmd []string, err error) {
+func (s *staticcheck) installedInTheSystem() (format string, args []any) {
+	var err error
 	if _, err = exec.LookPath("staticcheck"); errors.Is(err, exec.ErrNotFound) {
-		return nil, nil
-	} else if err != nil {
 		return
 	}
-
-	return []string{"staticcheck"}, nil
+	must(err)
+	return "staticcheck", nil
 }
 
 // withTests executes staticcheck considering the tests.
-func (s staticcheck) withTests(ctx context.Context, cmd []string) (message string, err error) {
-	var b strings.Builder
-	var stderr strings.Builder
-	cmd = append(cmd, "."+string(os.PathSeparator)+"...")
-	execCmd := s.os.newCmd(ctx, s.workDir, &b, &stderr, cmd[0], cmd[1:]...)
-
-	err = execCmd.Run()
-	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
-		return b.String(), nil
-	}
-
-	if s.noPackages(stderr.String()) {
-		return "no Go packages", nil
-	}
-
-	return
+func (s *staticcheck) withTests(ctx context.Context, format string, args ...any) (message string) {
+	args = append(args, os.PathSeparator)
+	stdout, _, _ := execCommand(ctx, s.workDir, format+" .%c...", args...)
+	return stdout.String()
 }
 
 // withoutTests executes "staticcheck -tests=false -checks=U1000" and returns the message.
 //
 // With the "-tests=false" parameter a function is not considered used if only tests call it.
 // I think that only the U1000 check is afected by "-tests=false".
-func (s staticcheck) withoutTests(ctx context.Context, cmd []string) (message string, err error) {
-	var b strings.Builder
-	var stderr strings.Builder
-	cmd = append(cmd, "-tests=false", "-checks=U1000", "."+string(os.PathSeparator)+"...")
-	execCmd := s.os.newCmd(ctx, s.workDir, &b, &stderr, cmd[0], cmd[1:]...)
-
-	err = execCmd.Run()
-	if exitError := new(exec.ExitError); errors.As(err, &exitError) {
-		return b.String(), nil
-	}
-
-	return
-}
-
-func (s staticcheck) noPackages(stderr string) bool {
-	for line := range strings.Lines(stderr) {
-		line = strings.TrimSpace(line)
-		parts := strings.SplitN(line, `"`, 3)
-		if parts[0] == `warning: ` && parts[2] == ` matched no packages` {
-			return true
-		}
-	}
-	return false
+func (s *staticcheck) withoutTests(ctx context.Context, format string, args ...any) (message string) {
+	args = append(args, os.PathSeparator)
+	stdout, _, _ := execCommand(ctx, s.workDir, format+" -tests=false -checks=U1000 .%c...", args...)
+	return stdout.String()
 }
 
 // packageOperation is operates in only one packages.
@@ -691,26 +671,17 @@ type packageOperation interface {
 	run(ctx context.Context, pkg string) (message string, err error)
 }
 
-// pkgpkgOpGroup executes package operations. The method wait returns the first failure, if any.
-// That is, the first operation result where the message is not empty or the error is non nil.
-// First not respect to the order of the calls to executeGo, that is, if multiple
-// operations return failures then wait returns the failure of the first operation that returned.
-//
-// If there is no failure then wait returns the empty message and the nil error.
+// pkgpkgOpGroup executes package operations.
 type pkgOpGroup struct {
 	ops        []packageOperation
 	cancellers []context.CancelFunc
 	rs         []pkgOpGroupOperationResult
 	wg         sync.WaitGroup
 	resultCh   chan pkgOpGroupOperationResult
-
-	// is so that the tests can determine how many package operations have already been completed.
-	done        *sync.Cond
-	numberEnded int
 }
 
 func newPkgOpGroup() *pkgOpGroup {
-	return &pkgOpGroup{resultCh: make(chan pkgOpGroupOperationResult), done: sync.NewCond(&sync.Mutex{})}
+	return &pkgOpGroup{resultCh: make(chan pkgOpGroupOperationResult)}
 }
 
 func (eg *pkgOpGroup) executeGo(ctx context.Context, pkgOp packageOperation, pkg string) {
@@ -723,16 +694,17 @@ func (eg *pkgOpGroup) executeGo(ctx context.Context, pkgOp packageOperation, pkg
 	eg.wg.Go(func() {
 		message, err := pkgOp.run(ctx, pkg)
 		eg.resultCh <- pkgOpGroupOperationResult{
-			message: message, err: err, pos: pos, done: true,
+			message: message, err: err, pos: pos,
 		}
-
-		eg.done.L.Lock()
-		eg.numberEnded++
-		eg.done.Signal()
-		eg.done.L.Unlock()
 	})
 }
 
+// wait returns the first failure, if any. That is, the first operation result where the message
+// is not empty or the error is non nil. Wait not respect to the order of the calls to executeGo,
+// that is, if multiple operations return failures then wait returns the failure of the first operation
+// that returned.
+//
+// If there is no failure then wait returns the empty message and the nil error.
 func (eg *pkgOpGroup) wait() (message string, err error) {
 	go func() {
 		eg.wg.Wait()
@@ -759,79 +731,55 @@ func (eg *pkgOpGroup) wait() (message string, err error) {
 }
 
 type pkgOpGroupOperationResult struct {
-	message string
 	pos     int
+	message string
 	err     error
-	done    bool
 }
 
 // tests is a operation that executes the tests.
 type tests struct {
 	workDir               string
 	timeoutForEachPackage time.Duration
-	os                    operatingSystem
+	tmpDir                string
+	linters               linters
 }
 
 // newTests creates a tests.
-func newTests(timeoutForEachPackage time.Duration, workDir string, opSys operatingSystem) operation {
-	return tests{
+func newTests(timeoutForEachPackage time.Duration, workDir, tmpDir string, linters linters) *tests {
+	return &tests{
 		workDir:               workDir,
 		timeoutForEachPackage: timeoutForEachPackage,
-		os:                    opSys,
+		tmpDir:                tmpDir,
+		linters:               linters,
 	}
 }
 
-func (t tests) run(ctx context.Context) (message string, err error) {
-	pkgs, err := t.listPackages(t.workDir, t.os)
-	if err != nil {
-		return "", fmt.Errorf("\tlan: from executing the tests\n%w", err)
+func (t *tests) run(ctx context.Context) (message string, err error) {
+	if !t.linters.wait() {
+		return
 	}
-	if len(pkgs) == 0 {
-		return "\tlan: from executing the tests\nno Go packages", nil
-	}
+
+	pkgs := t.listPackages(ctx)
+	mustOk(len(pkgs) > 0)
 
 	g := newPkgOpGroup()
-
 	for _, pkg := range pkgs {
-		tp := newTestsPkg(t.timeoutForEachPackage, t.workDir, t.os)
+		tp := newTestsPkg(t.timeoutForEachPackage, t.workDir, t.tmpDir)
 		g.executeGo(ctx, tp, pkg)
 	}
 
 	return g.wait()
 }
 
-func (t tests) listPackages(workDir string, opSys operatingSystem) (pkgs []string, err error) {
-	stdout := new(bytes.Buffer)
-	stderr := new(strings.Builder)
-	cmd := opSys.newCmd(context.Background(), workDir, stdout, stderr, "go", "list", "."+string(os.PathSeparator)+"...")
-	err = cmd.Run()
-	if _, isExitError := errors.AsType[*exec.ExitError](err); err != nil && !isExitError {
-		return
-	}
-	err = nil
+func (t *tests) listPackages(ctx context.Context) (pkgs []string) {
+	stdout, stderr, _ := execCommand(ctx, t.workDir, "go list .%c...", os.PathSeparator)
+	mustOk(stderr.Len() == 0)
 
-	if stderr.Len() > 0 {
-		str := stderr.String()
-		if t.noPackages(str) {
-			return pkgs, nil
-		}
-		return nil, errors.New(strings.TrimRightFunc(str, unicode.IsSpace))
-	}
-
-	for line := range bytes.Lines(stdout.Bytes()) {
-		pkgs = append(pkgs, string(bytes.TrimSpace(line)))
+	for line := range strings.Lines(stdout.String()) {
+		pkgs = append(pkgs, strings.TrimSpace(line))
 	}
 
 	return
-}
-
-func (t tests) noPackages(stderr string) bool {
-	for line := range strings.Lines(stderr) {
-		if strings.TrimSpace(line) == `go: warning: "./..." matched no packages` {
-			return true
-		}
-	}
-	return false
 }
 
 // testEvent is a event generated by the test command.
@@ -844,12 +792,12 @@ type testEvent struct {
 
 type testResultKind int
 
+// note that they are in the order of the sorting, (except the testResultIgnore).
 const (
 	testResultIgnore testResultKind = iota
 	testResultFail
 	testResultTimeout
 	testResultCoverageNot100PerCent
-	testResultBuildFail
 )
 
 type testResult struct {
@@ -865,67 +813,52 @@ var coverageRe = regexp.MustCompile(`^coverage: (\d{1,3}(?:\.\d)?)% of statement
 type testsPkg struct {
 	workDir string
 	timeout time.Duration
-	os      operatingSystem
+	tmpDir  string
 }
 
 // newTestsPkg creates a testsPkg.
-func newTestsPkg(timeout time.Duration, workDir string, opSys operatingSystem) packageOperation {
-	return testsPkg{
+func newTestsPkg(timeout time.Duration, workDir, tmpDir string) *testsPkg {
+	return &testsPkg{
 		workDir: workDir,
+		tmpDir:  tmpDir,
 		timeout: timeout,
-		os:      opSys,
 	}
 }
 
 // run executes the tests of the package.
-func (tp testsPkg) run(ctx context.Context, pkg string) (message string, err error) {
+func (tp *testsPkg) run(ctx context.Context, pkg string) (message string, err error) {
 	// even when the tests reports 100.0% of coverage some statements may not have been executed.
 	// Then we use the coverprofile to verifiy whether all statements were executed.
-	cpf, err := tp.os.createTemp("", "coverprofile*.out")
-	if err != nil {
-		return
-	}
-	cpf.Close()                    // we dont need the file now.
-	defer tp.os.remove(cpf.Name()) // we assume that the file will not be removed automatically by the system.
-
-	stdout := new(bytes.Buffer)
-	to := tp.timeout.String()
-	cmd := tp.os.newCmd(ctx,
-		tp.workDir, stdout, nil,
-		"go", "test", "-json", "-timeout="+to, "-vet=off", "-cover", "-failfast", "-coverprofile="+cpf.Name(), pkg,
-	)
-
-	err = cmd.Run()
-	if _, isExitError := errors.AsType[*exec.ExitError](err); err != nil && !isExitError {
-		return message, fmt.Errorf("\tlan: from executing the tests\n%w", err)
-	}
-
-	res, err := tp.result(stdout)
+	cpf, err := os.CreateTemp(tp.tmpDir, "coverprofile*.out")
 	if err != nil {
 		return "", fmt.Errorf("\tlan: from executing the tests\n%w", err)
 	}
+	cpf.Close()                 // we dont need the file now.
+	defer os.Remove(cpf.Name()) // we assume that the file will not be removed automatically by the system.
 
+	stdout, _, _ := execCommand(ctx, tp.workDir, "go test -json -timeout=%s -vet=off -cover -failfast -coverprofile=%s %s", tp.timeout, cpf.Name(), pkg)
+
+	res := tp.result(stdout)
 	return tp.message(res, cpf.Name())
 }
 
 // result decodes r into a result.
-func (tp testsPkg) result(r io.Reader) (tr testResult, err error) {
+func (tp *testsPkg) result(r io.Reader) (tr testResult) {
 	dec := jsontext.NewDecoder(r)
 	for {
 		var te testEvent
-		if err = json.UnmarshalDecode(dec, &te); err == io.EOF {
-			return tr, nil
-		} else if err != nil {
-			return
+		if mustOrEOF(json.UnmarshalDecode(dec, &te)) {
+			return tr
 		}
-		if tr = tp.toTestResult(te); tr.kind != testResultIgnore {
-			return
+		c := tp.toTestResult(te)
+		if c.kind != testResultIgnore && (tr.kind == testResultIgnore || c.kind < tr.kind) {
+			tr = c
 		}
 	}
 }
 
 // toTestResult decodes an event and returns their meaning.
-func (tp testsPkg) toTestResult(te testEvent) testResult {
+func (tp *testsPkg) toTestResult(te testEvent) testResult {
 	if te.Action == "fail" && te.Test != "" {
 		return testResult{kind: testResultFail, pkg: te.Package, message: fmt.Sprintf("%s: %s failed", te.Package, te.Test)}
 	}
@@ -943,16 +876,14 @@ func (tp testsPkg) toTestResult(te testEvent) testResult {
 			message: fmt.Sprintf("%s: test coverage is not 100.0%%", te.Package)}
 	}
 
-	if te.Action == "build-fail" && te.Test == "" && te.Package == "" {
-		return testResult{kind: testResultBuildFail, message: "build failed"}
-	}
+	mustOk(!(te.Action == "build-fail" && te.Test == "" && te.Package == ""))
 
 	return testResult{kind: testResultIgnore}
 }
 
-// message creates the message corresponding to the results of the execution of the tests,
+// message creates the message corresponding to the result of the execution of the tests,
 // and the coverprofile generated.
-func (tp testsPkg) message(tr testResult, coverProfileName string) (string, error) {
+func (tp *testsPkg) message(tr testResult, coverProfileName string) (string, error) {
 	if tr.kind == testResultIgnore {
 		return tp.messageFromCoverProfile(coverProfileName)
 	}
@@ -960,8 +891,8 @@ func (tp testsPkg) message(tr testResult, coverProfileName string) (string, erro
 }
 
 // messageFromCoverProfile creates the messages corresponding to the coverprofile generated.
-func (tp testsPkg) messageFromCoverProfile(fileName string) (message string, err error) {
-	f, err := tp.os.open(fileName)
+func (tp *testsPkg) messageFromCoverProfile(fileName string) (message string, err error) {
+	f, err := os.Open(fileName)
 	if err != nil {
 		return
 	}
@@ -974,53 +905,82 @@ func (tp testsPkg) messageFromCoverProfile(fileName string) (message string, err
 			return "\tlan: from cover profile\n" + line, nil
 		}
 	}
+	must(sc.Err())
 
-	return "", sc.Err()
+	return "", nil
 }
 
-var defaultOS = newOperatingSystem()
+func execCommand(ctx context.Context, dir string, format string, args ...any) (stdout, stderr *bytes.Buffer, exitError bool) {
+	s := fmt.Sprintf(format, args...)
+	parts := strings.Split(s, " ")
 
-// opSystem is for allowing the tests to change the behavior of the packages os and exec.
-type operatingSystem struct {
-	pathSeparator rune
-	// stdout is for os.Stdout.
-	stdout io.Writer
-	// exit is for os.Exit.
-	exit func(code int)
-	// createTemp is for the os.CreatTemp function.
-	createTemp func(dir string, pattern string) (*os.File, error)
-	// remove is for the os.Remove function.
-	remove func(name string) error
-	// open is for the os.Open function.
-	open func(name string) (io.ReadCloser, error)
-	// newCmd is for exec.CommandContext
-	newCmd func(ctx context.Context, worDir string, stdout, stderr io.Writer, name string, args ...string) command
-	// getwd is for os.Getwd
-	getwd func() (string, error)
+	name := parts[0]
+	arguments := parts[1:]
+
+	stdout, stderr = new(bytes.Buffer), new(bytes.Buffer)
+
+	cmd := exec.CommandContext(ctx, name, arguments...)
+	cmd.Dir = dir
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	exitError = mustOrExitError(cmd.Run())
+
+	return
 }
 
-func newOperatingSystem() operatingSystem {
-	return operatingSystem{
-		pathSeparator: os.PathSeparator,
-		stdout:        os.Stdout,
-		exit:          os.Exit,
-		createTemp:    os.CreateTemp,
-		remove:        os.Remove,
-		open: func(name string) (io.ReadCloser, error) {
-			return os.Open(name)
-		},
-		newCmd: func(ctx context.Context, workDir string, stdout, stderr io.Writer, name string, args ...string) command {
-			cmd := exec.CommandContext(ctx, name, args...)
-			cmd.Dir = workDir
-			cmd.Stdout = stdout
-			cmd.Stderr = stderr
-			return cmd
-		},
-		getwd: os.Getwd,
+func mustOrEOF(err error) (eof bool) {
+	if err == io.EOF {
+		return true
+	}
+	must(err)
+	return false
+}
+
+func mustOrExitError(err error) bool {
+	_, isExitError := errors.AsType[*exec.ExitError](err)
+	if err != nil && isExitError {
+		return true
+	}
+	must(err)
+	return false
+}
+
+func must2[T any](v T, err error) T {
+	must(err)
+	return v
+}
+
+func must(err error) {
+	mustLogger(err, log.Default())
+}
+
+func mustOkType[T any](v any) T {
+	vt, ok := v.(T)
+	mustOk(ok)
+	return vt
+}
+
+func mustOk(ok bool) {
+	mustOkLogger(ok, log.Default())
+}
+
+func mustLogger(err error, logger interface{ Fatalf(string, ...any) }) {
+	if err != nil {
+		logger.Fatalf(
+			"\tlan: internal error:\n%s\n"+
+				"please, consider reporting this as a Github issue on the Lan repository\n"+
+				"\tlan version: %s", err.Error(), version,
+		)
 	}
 }
 
-// command is for allowing the tests to change the behavior of the exec.Cmd struct.
-type command interface {
-	Run() error
+func mustOkLogger(ok bool, logger interface{ Fatalf(string, ...any) }) {
+	if !ok {
+		logger.Fatalf(
+			"\tlan: internal error\n"+
+				"please, consider reporting this as a Github issue on the Lan repository\n"+
+				"\tlan version: %s", version,
+		)
+	}
 }

@@ -1,757 +1,534 @@
 package main
 
+// Copyright (c) 2025, João Breno. See the license.
+
 import (
-	"context"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
-	"testing/iotest"
 	"time"
+	"unicode"
 )
 
-// Copyright (c) 2025, João Breno. See the license.
-
-func TestGetcwdError(t *testing.T) {
-	t.Cleanup(func() { defaultOS = newOperatingSystem() })
-	t.Chdir(filepath.Join("testdata", "fusptop"))
-
-	errMsg := "getwd error"
-	defaultOS.stdout = new(strings.Builder)
-	defaultOS.getwd = func() (string, error) {
-		return "", errors.New(errMsg)
+func TestMainFunc(t *testing.T) {
+	discard, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
 	}
-	var exitCode int
-	defaultOS.exit = func(code int) {
-		exitCode = code
-	}
-
-	main()
-
-	message := defaultOS.stdout.(*strings.Builder).String()
-	if message != errMsg {
-		t.Errorf("message = %q, want %q", message, errMsg)
-	}
-
-	if exitCode != 1 {
-		t.Errorf("exit code = %d, want 1", exitCode)
-	}
-}
-
-// tests the case where a call to cmd.Run() returns an error.
-// To make it return an error we change the PATH environment variable to a directory that don't have
-// the go command.
-func TestCmdRunError(t *testing.T) {
-	t.Chdir(path.Join("testdata", "fusptop"))
+	defer discard.Close()
 
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	opSys := newOperatingSystem()
-	prevNewCmd := opSys.newCmd
-	opSys.newCmd = func(ctx context.Context, workDir string, stdout, stderr io.Writer, name string, args ...string) command {
-		if args[0] == "tool" { // running "go tool"
-			return testCmd(func() error { return errors.New("go not found") })
+	stdout := os.Stdout
+	t.Cleanup(func() { os.Stdout = stdout })
+	os.Stdout = discard
+
+	t.Run("deny", func(t *testing.T) {
+		dirPath := filepath.Join(wd, "testdata", "cases", "build", "case00")
+		t.Chdir(dirPath)
+
+		var exitCode int
+		exit = func(code int) {
+			exitCode = code
 		}
-		return prevNewCmd(t.Context(), workDir, stdout, stderr, name, args...)
+
+		main()
+		if exitCode != 1 {
+			t.Errorf("exit code = %d", exitCode)
+		}
+	})
+	t.Run("allow", func(t *testing.T) {
+		dirPath := filepath.Join(wd, "testdata", "cases", "tests", "case00")
+		t.Chdir(dirPath)
+
+		var exitCode int
+		exit = func(code int) {
+			exitCode = code
+		}
+
+		main()
+		if exitCode != 0 {
+			t.Errorf("exit code = %d", exitCode)
+		}
+	})
+}
+
+func TestOsOpen(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
 	}
+	dirPath := filepath.Join(wd, "testdata", "cases", "build", "case00")
 
-	t.Setenv("PATH", wd)
-
-	cases := []struct{ op operation }{
-		{op: newBuild(wd, opSys)},
-		{op: newTests(1*time.Second, wd, opSys)},
-		{op: newVet(wd, opSys)},
-		{op: newStaticcheck(wd, opSys)},
-	}
-
-	for _, c := range cases {
-		t.Run(fmt.Sprintf("%T", c.op), func(t *testing.T) {
-			if _, err := c.op.run(t.Context()); err == nil {
-				t.Errorf("run did not return a error")
-			}
-		})
-	}
-
-	denyGit, message := run(runConfig{workDir: wd, os: opSys})
-	if !denyGit || message == "" {
-		t.Errorf("not deny git or message is empty")
+	tp := newTestsPkg(0, wd, "")
+	_, err = tp.messageFromCoverProfile(filepath.Join(dirPath, "covnonexists.txt"))
+	if err == nil {
+		t.Error("err == nil")
 	}
 }
 
-// test the case where a operation returns a error
-func TestRunOpError(t *testing.T) {
-	t.Chdir(path.Join("testdata", "fusptop"))
+func TestMust(t *testing.T) {
+	t.Run("error", func(t *testing.T) {
+		var l logger
+		err := errors.New("err")
+		mustLogger(err, &l)
+		want := fmt.Sprintf("\tlan: internal error:\n%s\n"+
+			"please, consider reporting this as a Github issue on the Lan repository\n"+
+			"\tlan version: %s", err.Error(), version)
+		if string(l) != want {
+			t.Errorf("got %q", l)
+		}
+	})
 
+	t.Run("ok", func(t *testing.T) {
+		var l logger
+		mustOkLogger(false, &l)
+		want := fmt.Sprintf("\tlan: internal error\n"+
+			"please, consider reporting this as a Github issue on the Lan repository\n"+
+			"\tlan version: %s", version)
+		if string(l) != want {
+			t.Errorf("got %q", l)
+		}
+	})
+}
+
+type logger string
+
+func (l *logger) Fatalf(format string, v ...any) {
+	*l = logger(fmt.Sprintf(format, v...))
+}
+
+func TestDirs(t *testing.T) {
+	var dirs []*testDir
+	for _, dirPath := range dirsForTest(t) {
+		dirs = append(dirs, unmarshalDir(t, dirPath))
+	}
+	for i := range dirs {
+		_, testName, _ := strings.CutLast(dirs[i].path, "testdata")
+		t.Run(testName, dirs[i].run)
+	}
+}
+
+func dirsForTest(t *testing.T) (result []string) {
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	opSys := newOperatingSystem()
-	prevNewCmd := opSys.newCmd
-	opSys.newCmd = func(ctx context.Context, workDir string, stdout, stderr io.Writer, name string, args ...string) command {
-		if args[0] == "tool" { // running "go tool"
-			return testCmd(func() error { return errors.New("go not found") })
+	testdataFS := os.DirFS(filepath.Join(wd, "testdata"))
+	containsRes := func(path string) (bool, error) {
+		subDirs, err := fs.ReadDir(testdataFS, path)
+		if err != nil {
+			return false, err
 		}
-		return prevNewCmd(t.Context(), workDir, stdout, stderr, name, args...)
+
+		isRes := func(d fs.DirEntry) bool {
+			return !d.IsDir() && d.Name() == "res.txt"
+		}
+
+		return slices.ContainsFunc(subDirs, isRes), nil
 	}
 
-	denyGit, message := run(runConfig{workDir: wd, os: opSys})
-	if !denyGit || message == "" {
-		t.Errorf("not deny git or message is empty")
-	}
+	fs.WalkDir(testdataFS, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if contains, err := containsRes(path); !contains || err != nil {
+			return err
+		}
+		result = append(result, filepath.Join(wd, "testdata", path))
+		return fs.SkipDir
+	})
+
+	return
 }
 
-func TestOpGroupError(t *testing.T) {
-	t.Parallel()
-	const N = 3
-
-	var done []chan struct{}
-	var msgs []string
-	var errs []error
-	var ops []op
-	var numbers []int
-
-	for n := range N {
-		done = append(done, make(chan struct{}))
-		msgs = append(msgs, "")
-		errs = append(errs, nil)
-		ops = append(ops, func(context.Context) (string, error) { <-done[n]; return msgs[n], errs[n] })
-		numbers = append(numbers, n)
-	}
-
-	for errorsUntil := range N + 1 {
-		for _, perm := range perms(numbers) {
-			for n := range N {
-				msgs[n] = ""
-				errs[n] = nil
-			}
-			for _, n := range perm[:errorsUntil] {
-				errs[n] = fmt.Errorf("error from op %d", n)
-			}
-			if errorsUntil > 0 {
-				for n := 1 + slices.Min(perm[:errorsUntil]); n < N; n++ {
-					msgs[n] = fmt.Sprintf("message from op %d", n)
-				}
-			}
-
-			var wantedError error
-			for n := range N {
-				if errs[n] != nil {
-					wantedError = errs[n]
-					break
-				}
-			}
-
-			eg := newOpGroup()
-			for n := range N {
-				eg.executeGo(t.Context(), ops[n])
-			}
-
-			go func() {
-				for i, n := range perm {
-					done[n] <- struct{}{}
-					eg.done.L.Lock()
-					for eg.numberEnded < i+1 {
-						eg.done.Wait()
-					}
-					eg.done.L.Unlock()
-				}
-			}()
-
-			_, err := eg.wait()
-			if err != wantedError {
-				t.Errorf("for {perm: %v, errorsUntil: %d}: got %q, want %q", perm, errorsUntil, err, wantedError)
-			}
-
-			// check for leaks. If has one, then this test will not end.
-			eg.done.L.Lock()
-			for eg.numberEnded != N {
-				eg.done.Wait()
-			}
-			eg.done.L.Unlock()
-		}
-	}
+type testDir struct {
+	path                   string
+	ops                    []*opTest
+	pathWithoutStaticcheck bool
 }
 
-func TestOpGroupMessages(t *testing.T) {
-	t.Parallel()
-	const N = 3
+func unmarshalDir(t *testing.T, path string) *testDir {
+	d := &testDir{
+		path: path,
+	}
+	options, dataOps := readRes(t, filepath.Join(path, "res.txt"))
+	if options != "" {
+		unmarshalOptions(t, d, options)
+	}
+	for i := range dataOps {
+		d.ops = append(d.ops, unmarshallOpTest(t, path, dataOps[i]))
+	}
+	return d
+}
 
-	var done []chan struct{}
-	var msgs []string
-	var errs []error
-	var ops []op
-	var numbers []int
+func readRes(t *testing.T, path string) (string, []string) {
+	var b strings.Builder
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err = io.Copy(&b, f); err != nil {
+		t.Fatal(err)
+	}
+	data := b.String()
 
-	for n := range N {
-		done = append(done, make(chan struct{}))
-		msgs = append(msgs, "")
-		errs = append(errs, nil)
-		ops = append(ops, func(context.Context) (string, error) { <-done[n]; return msgs[n], errs[n] })
-		numbers = append(numbers, n)
+	var options string
+	if strings.HasPrefix(data, "(") {
+		ind := strings.IndexRune(data, ')')
+		if ind < 0 {
+			t.Fatal("missing ')'")
+		}
+		options = data[:ind+1]
+		data = data[ind+1:]
+	}
+	var dataOps []string
+	for _, dataOp := range strings.Split(data, "lan: ") {
+		dataOp = strings.TrimRight(dataOp, " \t")
+		if strings.TrimSpace(dataOp) == "" {
+			continue
+		}
+		dataOps = append(dataOps, "\tlan: "+dataOp)
 	}
 
-	for messagesUntil := range N + 1 {
-		for _, perm := range perms(numbers) {
-			for n := range N {
-				msgs[n] = ""
-				errs[n] = nil
-			}
-			for _, n := range perm[:messagesUntil] {
-				msgs[n] = fmt.Sprintf("message from op %d", n)
-			}
-			if messagesUntil > 0 {
-				for n := 1 + slices.Min(perm[:messagesUntil]); n < N; n++ {
-					errs[n] = fmt.Errorf("error from op %d", n)
-				}
-			}
+	return options, dataOps
+}
 
-			var wantedMessage string
-			for n := range N {
-				if msgs[n] != "" {
-					wantedMessage = msgs[n]
-					break
-				}
-			}
+func unmarshalOptions(t *testing.T, d *testDir, line string) {
+	options := strings.TrimPrefix(line, "(")
+	options = strings.TrimSuffix(options, ")")
 
-			eg := newOpGroup()
-			for n := range N {
-				eg.executeGo(t.Context(), ops[n])
-			}
-
-			go func() {
-				for i, n := range perm {
-					done[n] <- struct{}{}
-					eg.done.L.Lock()
-					for eg.numberEnded < i+1 {
-						eg.done.Wait()
-					}
-					eg.done.L.Unlock()
-				}
-			}()
-
-			msg, _ := eg.wait()
-			if msg != wantedMessage {
-				t.Errorf("for {perm: %v, errorsUntil: %d}: got %q, want %q", perm, messagesUntil, msg, wantedMessage)
-			}
-
-			// check for leaks. If has one, then this test will not end.
-			eg.done.L.Lock()
-			for eg.numberEnded != N {
-				eg.done.Wait()
-			}
-			eg.done.L.Unlock()
+	for _, option := range strings.Split(options, ",") {
+		option = strings.TrimSpace(option)
+		switch option {
+		case "path without staticcheck":
+			d.pathWithoutStaticcheck = true
+		default:
+			t.Fatalf("unknown option %q, near %q", option, line)
 		}
 	}
 }
 
-func TestPkgOpGroupError(t *testing.T) {
-	t.Parallel()
-	const N = 3
-
-	var done []chan struct{}
-	var errs []error
-	var ops []pkgOp
-	var numbers []int
-
-	for n := range N {
-		done = append(done, make(chan struct{}))
-		errs = append(errs, nil)
-		ops = append(ops, func(context.Context, string) (string, error) { <-done[n]; return "", errs[n] })
-		numbers = append(numbers, n)
+func (d *testDir) run(t *testing.T) {
+	if d.pathWithoutStaticcheck {
+		d.removeStaticcheckFromPATH(t)
+	} else {
+		t.Parallel()
 	}
 
-	for errorsUntil := range N + 1 {
-		for _, doneOrder := range perms(numbers) {
-			for n := range N {
-				errs[n] = nil
-			}
-			for _, n := range doneOrder[:errorsUntil] {
-				errs[n] = fmt.Errorf("error from op %d", n)
-			}
+	cfg := runConfig{workDir: d.path, testTimeout: d.testTimeout(), waitFunc: (*opGroup).waitAll}
+	if d.tempDirDoesNotExists() {
+		cfg.tmpDir = filepath.Join(d.path, "tmpdir")
+	}
+	denyGit, message := run(cfg)
+	if strings.TrimRightFunc(message, unicode.IsSpace) != message {
+		t.Errorf("whitespace at end\n%q", message)
+	}
+	if err := d.check(denyGit, message); err != nil {
+		t.Error(err)
+	}
+}
 
-			wantedError := errs[doneOrder[0]]
+func (d *testDir) removeStaticcheckFromPATH(t *testing.T) {
+	p := os.Getenv("PATH")
 
-			eg := newPkgOpGroup()
-			for n := range N {
-				eg.executeGo(t.Context(), ops[n], "")
-			}
+	staticcheckPath, err := exec.LookPath("staticcheck")
+	if err != nil {
+		t.Fatal(err)
+	}
 
-			go func() {
-				for i, n := range doneOrder {
-					done[n] <- struct{}{}
-					eg.done.L.Lock()
-					for eg.numberEnded < i+1 {
-						eg.done.Wait()
-					}
-					eg.done.L.Unlock()
-				}
-			}()
+	goPath, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
 
-			_, err := eg.wait()
-			if err != wantedError {
-				t.Errorf("for {doneOrder: %v, errorsUntil: %d}: got %q, want %q", doneOrder, errorsUntil, err, wantedError)
-			}
+	staticcheckPath = filepath.Dir(staticcheckPath)
+	goPath = filepath.Dir(goPath)
 
-			// check for leaks. If has one, then this test will not end.
-			eg.done.L.Lock()
-			for eg.numberEnded != N {
-				eg.done.Wait()
-			}
-			eg.done.L.Unlock()
+	if staticcheckPath == goPath {
+		t.Fatal("staticcheck path = Go path")
+	}
+
+	p = strings.Replace(p, staticcheckPath+string(os.PathListSeparator), "", 1)
+	p = strings.TrimSuffix(p, staticcheckPath+string(os.PathSeparator))
+	p = strings.TrimSuffix(p, staticcheckPath)
+
+	t.Setenv("PATH", p)
+}
+
+func (d *testDir) check(denyGit bool, message string) error {
+	wantDenyGit := d.wantDenyGit()
+	if !denyGit && wantDenyGit {
+		return fmt.Errorf("deny git == %v, want %v", denyGit, wantDenyGit)
+	}
+
+	if !denyGit {
+		return nil
+	}
+
+	parts := strings.Split(message, "\tlan: ")
+	parts = slices.DeleteFunc(parts, func(s string) bool { return s == "" })
+	for i, op := range d.ops {
+		if i >= len(parts) {
+			break
+		}
+		message := "\tlan: " + parts[i]
+		message = strings.TrimRight(message, "\n")
+		if err := op.check(message); err != nil {
+			return err
 		}
 	}
-}
 
-func TestPkgOpGroupMessages(t *testing.T) {
-	t.Parallel()
-	const N = 3
-
-	var done []chan struct{}
-	var msgs []string
-	var ops []pkgOp
-	var numbers []int
-
-	for n := range N {
-		done = append(done, make(chan struct{}))
-		msgs = append(msgs, "")
-		ops = append(ops, func(context.Context, string) (string, error) { <-done[n]; return msgs[n], nil })
-		numbers = append(numbers, n)
+	if len(parts) > len(d.ops) {
+		var m string
+		for _, p := range parts[len(d.ops):] {
+			m += "\tlan: " + p
+		}
+		return errors.New("unexpected:\n" + m)
 	}
 
-	for messagesUntil := range N + 1 {
-		for _, doneOrder := range perms(numbers) {
-			for n := range N {
-				msgs[n] = ""
-			}
-			for _, n := range doneOrder[:messagesUntil] {
-				msgs[n] = fmt.Sprintf("message from op %d", n)
-			}
+	if len(parts) < len(d.ops) {
+		return d.ops[len(parts)].check("\tlan: " + parts[len(parts)-1])
+	}
 
-			wantedMessage := msgs[doneOrder[0]]
+	return nil
+}
 
-			eg := newPkgOpGroup()
-			for n := range N {
-				eg.executeGo(t.Context(), ops[n], "")
-			}
-
-			go func() {
-				for i, n := range doneOrder {
-					done[n] <- struct{}{}
-					eg.done.L.Lock()
-					for eg.numberEnded < i+1 {
-						eg.done.Wait()
-					}
-					eg.done.L.Unlock()
-				}
-			}()
-
-			msg, _ := eg.wait()
-			if msg != wantedMessage {
-				t.Errorf("for {doneOrder: %v, messagesUntil: %d}: got %q, want %q", doneOrder, messagesUntil, msg, wantedMessage)
-			}
-
-			// check for leaks. If has one, then this test will not end.
-			eg.done.L.Lock()
-			for eg.numberEnded != N {
-				eg.done.Wait()
-			}
-			eg.done.L.Unlock()
+func (d *testDir) wantDenyGit() bool {
+	for _, ot := range d.ops {
+		if len(ot.regs) > 0 {
+			return true
 		}
 	}
+	return false
 }
 
-type op func(ctx context.Context) (message string, err error)
-
-func (o op) run(ctx context.Context) (message string, err error) {
-	return o(ctx)
+func (d *testDir) testTimeout() (dur time.Duration) {
+	for _, ot := range d.ops {
+		if ot.testTimeout != 0 {
+			return ot.testTimeout
+		}
+	}
+	return
 }
 
-type pkgOp func(ctx context.Context, pkg string) (message string, err error)
-
-func (po pkgOp) run(ctx context.Context, pkg string) (message string, err error) {
-	return po(ctx, pkg)
+func (d *testDir) tempDirDoesNotExists() bool {
+	for _, ot := range d.ops {
+		if ot.tempDirDoesNotExists {
+			return true
+		}
+	}
+	return false
 }
 
-func perms(a []int) (ps [][]int) {
-	if len(a) <= 1 {
-		ps = append(ps, slices.Clone(a))
+type opTest struct {
+	dir   string
+	head  string
+	lines []string
+	regs  []*regexp.Regexp
+
+	all                  bool
+	ordered              bool
+	regexpQuantifier     string
+	testTimeout          time.Duration
+	tempDirDoesNotExists bool
+}
+
+func unmarshallOpTest(t *testing.T, dir string, data string) *opTest {
+	ot := &opTest{dir: dir}
+	firstLine, data, _ := strings.Cut(data, "\n")
+	ot.unmarshalFirstLine(t, firstLine)
+	ot.unmarshalRegexps(t, data)
+	return ot
+
+}
+
+func (op *opTest) unmarshalFirstLine(t *testing.T, line string) {
+	op.all = true
+	op.ordered = true
+	op.regexpQuantifier = "all"
+
+	line = strings.TrimRight(line, " \t\r")
+
+	ind := strings.IndexRune(line, '(')
+	if ind == -1 {
+		op.setHead(t, line)
 		return
 	}
+	op.setHead(t, line[:ind])
 
-	n := len(a) - 1
-	a = slices.Clone(a)
-	for i := range a {
-		a[n], a[i] = a[i], a[n]
-		for _, p := range perms(a[:n]) {
-			p = append(p, a[n])
-			ps = append(ps, p)
-		}
-		a[n], a[i] = a[i], a[n]
+	options, after, _ := strings.CutLast(line[ind+len("("):], ")")
+	if after != "" {
+		t.Fatalf("invalid head: text after ')': %q", after)
 	}
 
-	slices.SortFunc(ps, slices.Compare)
-
-	return ps
-}
-
-// tests the case where the "go test" command generates a result that is not JSON in the operation build.
-// To do this we replace the go command by another that dont generates JSON.
-func TestCmdNoJson_build(t *testing.T) {
-	t.Chdir(path.Join("testdata", "nojson"))
-
-	goPath, err := exec.LookPath("go")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := exec.Command(goPath, "clean").Run(); err != nil {
-		panic(err)
-	}
-
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("PATH", wd)
-
-	if err := exec.Command(goPath, "build", "go.go").Run(); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Cleanup(func() {
-		if err := exec.Command(goPath, "clean").Run(); err != nil {
-			panic(err)
-		}
-	})
-
-	op := newBuild(wd, newOperatingSystem())
-	if _, err := op.run(t.Context()); err == nil {
-		t.Error("err = nil")
-	}
-}
-
-func TestBuildCmdError(t *testing.T) {
-	t.Parallel()
-
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cases := []struct {
-		output   string
-		runError error
-	}{
-		{output: "<Language>Go</Language>"},
-		{runError: io.EOF},
-	}
-
-	for _, c := range cases {
-		b := newBuild(wd, newOperatingSystem()).(build)
-		b.os.newCmd = func(ctx context.Context, worDir string, stdout, stderr io.Writer, name string, args ...string) command {
-			return testCmd(func() error { io.WriteString(stdout, c.output); return c.runError })
-		}
-
-		if _, err = b.run(t.Context()); err == nil {
-			t.Error("err == nil")
+	for _, option := range strings.Split(options, ",") {
+		option = strings.TrimSpace(option)
+		switch option {
+		case "temp dir does not exists":
+			op.tempDirDoesNotExists = true
+		default:
+			if strings.HasPrefix(option, "timeout=") {
+				_, d, _ := strings.Cut(option, "=")
+				timeout, err := time.ParseDuration(d)
+				if err != nil {
+					t.Fatalf("%s: %s", option, err.Error())
+				}
+				op.testTimeout = timeout
+			} else {
+				t.Fatalf("unknown option %q, near %q", option, line)
+			}
 		}
 	}
 }
 
-// tests the case where the path used by thereAreTests is invalid.
-// In this case we expect that packages.Load returns an error.
-func TestThereAreTestsPackageLoadError(t *testing.T) {
-	t.Parallel()
-
-	// I think \x00 is not allowed in Linux and Windows.
-	op := newThereAreTests("\x00<\\/>", newOperatingSystem()).(thereAreTests)
-	if _, err := op.run(t.Context()); err == nil {
-		t.Errorf("err = nil, want an error explaining that the path is invalid")
+func (op *opTest) setHead(t *testing.T, h string) {
+	if !validHead(h) {
+		t.Fatalf("invalid head: %q", h)
 	}
+	op.head = h
 }
 
-func TestThereAreTestsRunError(t *testing.T) {
-	t.Parallel()
-
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	b := newThereAreTests(wd, newOperatingSystem()).(thereAreTests)
-	b.os.newCmd = func(ctx context.Context, worDir string, stdout, stderr io.Writer, name string, args ...string) command {
-		return testCmd(func() error { return io.EOF })
-	}
-
-	if _, err = b.run(t.Context()); err == nil {
-		t.Error("err == nil")
-	}
+// they are ordered from the first the can ocurr.
+var heads = []string{
+	"\tlan: from building",
+	"\tlan: error",
+	"\tlan: from cover profile",
+	"\tlan: from staticcheck",
+	"\tlan: from executing the tests",
+	"\tlan: from checking if there are tests",
+	"\tlan: from go vet",
 }
 
-// tests the case where the createTemp method returns a error.
-func TestCreateTempError(t *testing.T) {
-	t.Parallel()
-
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	op := newTests(1*time.Second, wd, newOperatingSystem()).(tests)
-	errorMsg := "CreateTemp: error"
-	op.os.createTemp = func(dir, pattern string) (*os.File, error) {
-		return nil, errors.New("CreateTemp: error")
-	}
-	op.os.remove = nil
-
-	if _, err := op.run(t.Context()); err == nil {
-		t.Errorf("err = nil")
-	} else if err.Error() != errorMsg {
-		t.Errorf("err.Error() = %q, want %q", err.Error(), errorMsg)
-	}
+func validHead(head string) bool {
+	return slices.Contains(heads, head)
 }
 
-// tests the case where the "go test" command generates a result that is not JSON in the operations tests.
-// To do this we replace the go command by another that dont generates JSON.
-func TestCmdNoJson_tests(t *testing.T) {
-	t.Chdir(path.Join("testdata", "nojson"))
+func (ot *opTest) unmarshalRegexps(t *testing.T, data string) {
+	for line := range strings.Lines(data) {
+		line = strings.TrimSpace(line)
+		ot.lines = append(ot.lines, line)
 
-	goPath, err := exec.LookPath("go")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// to handle the case where an error in a previous execution of the tests resulted
-	// in the executable remaining in the folder.
-	if err := exec.Command(goPath, "clean").Run(); err != nil {
-		panic(err)
-	}
-
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("PATH", wd)
-
-	if err := exec.Command(goPath, "build", "go.go").Run(); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Cleanup(func() {
-		if err := exec.Command(goPath, "clean").Run(); err != nil {
-			panic(err)
+		reg, err := regexp.Compile(line)
+		if err != nil {
+			t.Fatal(err)
 		}
-	})
-	op := newTests(1*time.Millisecond, wd, newOperatingSystem())
-	if _, err := op.run(t.Context()); err == nil {
-		t.Error("err = nil")
+
+		ot.regs = append(ot.regs, reg)
 	}
 }
 
-// tests the case where the "go test" command generates a result that is not JSON, in
-// the operation thereAreTests. To do this we replace the go command by another that
-// dont generates JSON.
-func TestCmdNoJson_thereAreTests(t *testing.T) {
-	goPath, err := exec.LookPath("go")
-	if err != nil {
-		t.Fatal(err)
+func (ot *opTest) check(message string) error {
+	var lines []string
+	for line := range strings.Lines(message) {
+		lines = append(lines, strings.TrimRight(line, "\n"))
 	}
 
-	t.Chdir(path.Join("testdata", "nojson"))
-
-	// to handle the case where an error in a previous execution of the tests resulted
-	// in the executable remaining in the folder.
-	if err := exec.Command(goPath, "clean").Run(); err != nil {
-		t.Fatal(err)
+	if len(lines) == 0 && len(ot.regs) == 0 {
+		return nil
 	}
 
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
+	if len(lines) == 0 && len(ot.regs) > 0 {
+		return ot.createError("expecting at least 1 line", lines)
 	}
 
-	t.Setenv("PATH", wd)
-
-	if err := exec.Command(goPath, "build", "go.go").Run(); err != nil {
-		t.Fatal(err)
+	if len(ot.regs) == 0 {
+		return ot.createError("expecting 0 lines", lines)
 	}
 
-	t.Cleanup(func() {
-		if err := exec.Command(goPath, "clean").Run(); err != nil {
-			panic(err)
+	head := strings.TrimRight(lines[0], " \t\r")
+	body := lines[1:]
+
+	if head != ot.head {
+		return ot.createError("invalid head", lines)
+	}
+
+	if len(body) != len(ot.regs) {
+		return ot.createError("expecting at least 2 body", lines)
+	}
+
+	if err := ot.checkRegexps(body); err != nil {
+		return ot.createError(err.Error(), lines)
+	}
+
+	return nil
+}
+
+func (ot *opTest) createError(msg string, gotLines []string) error {
+	expected := []string{ot.head}
+	expected = append(expected, ot.lines...)
+
+	b := new(bytes.Buffer)
+	b.WriteString(msg + "\n")
+	ot.writeExpectedAndGot(b, expected, gotLines)
+
+	return errors.New(b.String())
+}
+
+func (ot *opTest) checkRegexps(bodyLines []string) error {
+	var regexpsMatched []int
+	var linesMatched []int
+
+	for regIndex, reg := range ot.regs {
+		if slices.Contains(regexpsMatched, regIndex) {
+			continue
 		}
-	})
-
-	pkgOp := newThereAreTests(wd, newOperatingSystem()).(thereAreTests)
-	if _, err = pkgOp.has(); err == nil {
-		t.Error("err == nil")
-	}
-}
-
-// test the case where the opening of the coverprofile returns an error.
-func TestCoverProfileOpenError_tests(t *testing.T) {
-	t.Parallel()
-
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	wd = filepath.Join(wd, "testdata", "fusptop")
-
-	op := newTests(1*time.Millisecond, wd, newOperatingSystem()).(tests)
-	errMsg := "Open: error"
-	op.os.open = func(name string) (io.ReadCloser, error) {
-		return nil, errors.New(errMsg)
-	}
-
-	if _, err = op.run(t.Context()); err == nil {
-		t.Error("err = nil")
-	} else if err.Error() != errMsg {
-		t.Errorf("err.Error() = %q, want %q", err.Error(), errMsg)
-	}
-}
-
-// test the case where the reading of the cover profile returns an error.
-func TestScannerError_tests(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	wd = filepath.Join(wd, "testdata", "fusptop")
-
-	op := newTests(1*time.Millisecond, wd, newOperatingSystem()).(tests)
-	errMsg := "scanner: error"
-	op.os.open = func(name string) (io.ReadCloser, error) {
-		return io.NopCloser(iotest.ErrReader(errors.New(errMsg))), nil
-	}
-
-	if _, err := op.run(t.Context()); err == nil {
-		t.Error("err = nil")
-	} else if err.Error() != errMsg {
-		t.Errorf("err.Error() = %q, want %q", err.Error(), errMsg)
-	}
-}
-
-// TestStaticcheckNotFoundInTheSystem tests the case where the staticcheck was not installed
-// in the system. For making this happens we change the PATH environment
-// variable to a directory that hasn't the staticcheck command.
-func TestStaticcheckNotFoundInTheSystem(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("PATH", wd)
-
-	op := newStaticcheck(filepath.Join(wd, "testdata", "fusptop"), newOperatingSystem()).(staticcheck)
-	if cmd, err := op.installedInTheSystem(); cmd != nil || err != nil {
-		t.Errorf("cmd = %v and err == %q, want cmd = <nil> and error = <nil>", cmd, err)
-	}
-}
-
-// TestStaticcheckLookPathError tests the case where the exec.LookPath("staticcheck") returns a error
-// that isn't exec.ErrNotFound. For making this happens we create a staticcheck command in the current
-// directory and change the PATH variable to not find the correct staticcheck command. With this exec.LookPath will
-// return exec.ErrDot.
-func TestStaticcheckLookPathError(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// change the current dir to where the fake staticcheck will be.
-	t.Chdir(filepath.Join(wd, "testdata", "staticcheckcmd"))
-
-	// create a fake staticcheck command.
-	createExecutable(t, "staticcheck.go")
-
-	// note that we dont include testdata/staticcheckcmd in the PATH because if we do that then LookPath will not
-	// return ErrDot.
-	t.Setenv("PATH", "."+string(os.PathListSeparator)+path.Join(wd, "testdata"))
-
-	op := newStaticcheck(filepath.Join(wd, "testdata", "staticcheckcmd"), newOperatingSystem()).(staticcheck)
-	if _, err := op.installedInTheSystem(); !errors.Is(err, exec.ErrDot) {
-		t.Errorf("want err = exec.ErrDot, found %v", err)
-	}
-}
-
-// TestStaticcheckCommandError tests the case where s.command returns a error. For making this happens
-// we change PATH to point to a directory that not contains the commands go and staticcheck.
-func TestStaticcheckCommandError(t *testing.T) {
-	dir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir = filepath.Join(dir, "testdata", "fusptop")
-
-	t.Chdir(filepath.Join("testdata", "fusptop"))
-	t.Setenv("PATH", filepath.Join(dir, "testdata", "testfail"))
-
-	op := newStaticcheck(dir, newOperatingSystem())
-
-	if _, err := op.run(t.Context()); err == nil {
-		t.Error("want err != nil, found nil")
-	}
-}
-
-// TestStaticcheckWithoutTestsError tests the case where run returns a error due to
-// withTest or withoutTest returning a error.
-func TestStaticcheckError(t *testing.T) {
-	t.Parallel()
-
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	wd = filepath.Join(wd, "testdata", "fusptop")
-
-	op := newStaticcheck(wd, newOperatingSystem()).(staticcheck)
-	prevNewCmd := op.os.newCmd
-	errorMsg := "failed to execute command"
-	op.os.newCmd = func(ctx context.Context, workDir string, stdout, stderr io.Writer, name string, args ...string) command {
-		if args[0] == "tool" { // running "go tool"
-			return prevNewCmd(t.Context(), workDir, stdout, stderr, name, args...)
+		for lineIndex, line := range bodyLines {
+			if slices.Contains(linesMatched, lineIndex) {
+				continue
+			}
+			line = strings.TrimSpace(line)
+			if reg.MatchString(line) {
+				regexpsMatched = append(regexpsMatched, regIndex)
+				linesMatched = append(linesMatched, lineIndex)
+				break
+			}
 		}
-		return testCmd(func() error { return errors.New(errorMsg) })
 	}
 
-	if _, err := op.run(t.Context()); err == nil {
-		t.Errorf("err == nil")
-	} else if err.Error() != "\tlan: from staticcheck\n"+errorMsg {
-		t.Errorf("want error.Error() == %s, got %s", errorMsg, err.Error())
+	ordered := slices.IsSorted(linesMatched)
+	allLines := len(linesMatched) == len(bodyLines)
+	allRegexps := len(regexpsMatched) == len(ot.regs)
+	someRegexp := len(regexpsMatched) > 0
+
+	var msgs []string
+	if ot.ordered && !ordered {
+		msgs = append(msgs, "not ordered")
 	}
+	if ot.all && !allLines {
+		msgs = append(msgs, "not all lines")
+	}
+	if ot.regexpQuantifier == "all" && !allRegexps {
+		msgs = append(msgs, "not all regexps")
+	}
+	if ot.regexpQuantifier == "exists" && !someRegexp {
+		msgs = append(msgs, "no regexp matched")
+	}
+	if len(msgs) > 0 {
+		return errors.New(strings.Join(msgs, ", "))
+	}
+
+	return nil
 }
 
-type testCmd func() error
-
-func (c testCmd) Run() error {
-	return c()
-}
-
-// createExecutable run "go build "+goFileName to create a executable in the current directory and uses Cleanup
-// to remove it.
-func createExecutable(t *testing.T, goFileName string) {
-	cmd := exec.Command("go", "build", goFileName)
-	if err := cmd.Run(); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Cleanup(func() {
-		if err := exec.Command("go", "clean").Run(); err != nil {
-			panic(err)
-		}
-	})
+func (ot *opTest) writeExpectedAndGot(b *bytes.Buffer, expected, got []string) {
+	fmt.Fprintf(b, "EXPECTED\n%s\n", strings.Join(expected, "\n"))
+	fmt.Fprintf(b, "GOT\n%s", strings.Join(got, "\n"))
 }

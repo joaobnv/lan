@@ -1,1 +1,0 @@
-.*sptnt: test coverage is not 100\.0%

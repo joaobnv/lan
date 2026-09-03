@@ -1,0 +1,2 @@
+        lan: from executing the tests(timeout=100ns)
+github\.com/joaobnv/lan/cases: panic: test timed out after 100ns

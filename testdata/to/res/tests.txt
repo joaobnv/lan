@@ -1,2 +1,0 @@
-(timeout=100ns)
-to: panic: test timed out after 100ns

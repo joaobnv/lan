@@ -1,0 +1,4 @@
+        lan: from checking if there are tests
+github\.com/joaobnv/lan/cases has no tests
+        lan: from staticcheck
+main\.go:14:2: should use copy\(to, from\) instead of a loop \(S1001\)

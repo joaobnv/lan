@@ -1,0 +1,2 @@
+        lan: from staticcheck
+main.go:5:6: func add is unused \(U1000\)

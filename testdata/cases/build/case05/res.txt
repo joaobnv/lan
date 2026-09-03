@@ -1,0 +1,3 @@
+        lan: from building
+go: errors parsing go\.mod:
+go\.mod:5: unknown directive: syntax

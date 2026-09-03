@@ -1,0 +1,2 @@
+        lan: from cover profile
+github.com/joaobnv/lan/cases/sne.go:2014.2,2014.18 1 0

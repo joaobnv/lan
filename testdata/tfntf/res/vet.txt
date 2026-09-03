@@ -1,5 +1,0 @@
-(not all, unordered)
-.* append with no values$
-.* format %d has arg a of wrong type \[\]string$
-.* Testlc has malformed name: first letter after 'Test' must not be lowercase$
-.* Fuzzlc has malformed name: first letter after 'Fuzz' must not be lowercase$
