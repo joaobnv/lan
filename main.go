@@ -444,6 +444,9 @@ func (t *thereAreTests) isFuzzTestFunction(ti *types.Info, f *ast.FuncDecl) bool
 }
 
 func (t *thereAreTests) hasTestSignature(ti *types.Info, f *ast.FuncDecl, prefix string, paramTypeName string) bool {
+	if f.Name.Name == "TestMain" {
+		return false
+	}
 	if !strings.HasPrefix(f.Name.Name, prefix) {
 		return false
 	}

@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -313,7 +312,7 @@ func (d *testDir) check(denyGit bool, message string) error {
 
 func (d *testDir) wantDenyGit() bool {
 	for _, ot := range d.ops {
-		if len(ot.regs) > 0 {
+		if len(ot.lines) > 0 {
 			return true
 		}
 	}
@@ -342,11 +341,7 @@ type opTest struct {
 	dir   string
 	head  string
 	lines []string
-	regs  []*regexp.Regexp
 
-	all                  bool
-	ordered              bool
-	regexpQuantifier     string
 	testTimeout          time.Duration
 	tempDirDoesNotExists bool
 }
@@ -355,16 +350,12 @@ func unmarshallOpTest(t *testing.T, dir string, data string) *opTest {
 	ot := &opTest{dir: dir}
 	firstLine, data, _ := strings.Cut(data, "\n")
 	ot.unmarshalFirstLine(t, firstLine)
-	ot.unmarshalRegexps(t, data)
+	ot.unmarshalBody(t, data)
 	return ot
 
 }
 
 func (op *opTest) unmarshalFirstLine(t *testing.T, line string) {
-	op.all = true
-	op.ordered = true
-	op.regexpQuantifier = "all"
-
 	line = strings.TrimRight(line, " \t\r")
 
 	ind := strings.IndexRune(line, '(')
@@ -421,17 +412,11 @@ func validHead(head string) bool {
 	return slices.Contains(heads, head)
 }
 
-func (ot *opTest) unmarshalRegexps(t *testing.T, data string) {
+func (ot *opTest) unmarshalBody(t *testing.T, data string) {
 	for line := range strings.Lines(data) {
-		line = strings.TrimSpace(line)
+		line = strings.TrimRight(line, "\r\n")
+		line = strings.ReplaceAll(line, "§", string(os.PathSeparator))
 		ot.lines = append(ot.lines, line)
-
-		reg, err := regexp.Compile(line)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		ot.regs = append(ot.regs, reg)
 	}
 }
 
@@ -441,15 +426,15 @@ func (ot *opTest) check(message string) error {
 		lines = append(lines, strings.TrimRight(line, "\n"))
 	}
 
-	if len(lines) == 0 && len(ot.regs) == 0 {
+	if len(lines) == 0 && len(ot.lines) == 0 {
 		return nil
 	}
 
-	if len(lines) == 0 && len(ot.regs) > 0 {
+	if len(lines) == 0 && len(ot.lines) > 0 {
 		return ot.createError("expecting at least 1 line", lines)
 	}
 
-	if len(ot.regs) == 0 {
+	if len(ot.lines) == 0 {
 		return ot.createError("expecting 0 lines", lines)
 	}
 
@@ -457,15 +442,15 @@ func (ot *opTest) check(message string) error {
 	body := lines[1:]
 
 	if head != ot.head {
-		return ot.createError("invalid head", lines)
+		return ot.createError("unexpected head", lines)
 	}
 
-	if len(body) != len(ot.regs) {
-		return ot.createError("expecting at least 2 body", lines)
+	if len(body) != len(ot.lines) {
+		return ot.createError("expecting at least 2 lines at body", lines)
 	}
 
-	if err := ot.checkRegexps(body); err != nil {
-		return ot.createError(err.Error(), lines)
+	if !ot.checkBody(body) {
+		return ot.createError("unexpected body", lines)
 	}
 
 	return nil
@@ -482,50 +467,16 @@ func (ot *opTest) createError(msg string, gotLines []string) error {
 	return errors.New(b.String())
 }
 
-func (ot *opTest) checkRegexps(bodyLines []string) error {
-	var regexpsMatched []int
-	var linesMatched []int
-
-	for regIndex, reg := range ot.regs {
-		if slices.Contains(regexpsMatched, regIndex) {
-			continue
-		}
-		for lineIndex, line := range bodyLines {
-			if slices.Contains(linesMatched, lineIndex) {
-				continue
-			}
-			line = strings.TrimSpace(line)
-			if reg.MatchString(line) {
-				regexpsMatched = append(regexpsMatched, regIndex)
-				linesMatched = append(linesMatched, lineIndex)
-				break
-			}
+func (ot *opTest) checkBody(bodyLines []string) bool {
+	for i, want := range ot.lines {
+		got := bodyLines[i]
+		got = strings.TrimRight(got, "\r\n")
+		if !strings.Contains(got, want) {
+			return false
 		}
 	}
 
-	ordered := slices.IsSorted(linesMatched)
-	allLines := len(linesMatched) == len(bodyLines)
-	allRegexps := len(regexpsMatched) == len(ot.regs)
-	someRegexp := len(regexpsMatched) > 0
-
-	var msgs []string
-	if ot.ordered && !ordered {
-		msgs = append(msgs, "not ordered")
-	}
-	if ot.all && !allLines {
-		msgs = append(msgs, "not all lines")
-	}
-	if ot.regexpQuantifier == "all" && !allRegexps {
-		msgs = append(msgs, "not all regexps")
-	}
-	if ot.regexpQuantifier == "exists" && !someRegexp {
-		msgs = append(msgs, "no regexp matched")
-	}
-	if len(msgs) > 0 {
-		return errors.New(strings.Join(msgs, ", "))
-	}
-
-	return nil
+	return true
 }
 
 func (ot *opTest) writeExpectedAndGot(b *bytes.Buffer, expected, got []string) {

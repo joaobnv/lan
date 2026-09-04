@@ -5,7 +5,7 @@ package main
 import "testing"
 
 func TestAdd(t *testing.T) {
-	if 10 + 100 != 110 {
+	if 10+100 != 110 {
 		t.Fail()
 	}
 }

@@ -1,3 +1,3 @@
-module github.com/joaobnv/lan/cases
+module github.com/joaobnv/lan/sne
 
-go 1.27.0
+go 1.27.1

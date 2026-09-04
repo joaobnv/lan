@@ -5,7 +5,7 @@ package main
 import "time"
 
 func Add[T ~int](n ...T) T {
-	time.Sleep(10*time.Second)
+	time.Sleep(10 * time.Second)
 	var r T
 	for _, v := range n {
 		r += v

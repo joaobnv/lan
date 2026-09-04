@@ -5,7 +5,7 @@ package main
 import "time"
 
 func Mul(n ...byte) int {
-	time.Sleep(10*time.Second)
+	time.Sleep(10 * time.Second)
 	var r int = 1
 	for _, v := range n {
 		r *= int(v)

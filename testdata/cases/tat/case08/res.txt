@@ -1,2 +1,2 @@
         lan: from checking if there are tests
-github\.com/joaobnv/lan/cases has no tests
+github.com/joaobnv/lan/cases has no tests

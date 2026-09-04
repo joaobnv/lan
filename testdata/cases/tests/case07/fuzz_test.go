@@ -3,8 +3,8 @@ package sne_test
 // Copyright (c) 2025, João Breno. See the license.
 
 import (
-	"github.com/joaobnv/lan/cases"
 	"testing"
+	"github.com/joaobnv/lan/sne"
 )
 
 func FuzzSub(f *testing.F) {

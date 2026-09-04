@@ -5,7 +5,7 @@ package main
 import "testing"
 
 func TestAdd(t *testing.T) {
-	if 2 + 4 != 6 {
+	if 2+4 != 6 {
 		t.Fail()
 	}
 }
